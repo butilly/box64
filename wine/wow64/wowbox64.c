@@ -27,6 +27,9 @@
 #include "hostext.h"
 #include "sysinfo.h"
 
+/* Not declared by the minimal MinGW winternl.h used for this target. */
+NTSTATUS WINAPI NtReadVirtualMemory(HANDLE, const void*, void*, SIZE_T, SIZE_T*);
+
 uintptr_t box64_pagesize = 4096;
 
 uint32_t default_gs = 0x2b;
@@ -52,6 +55,10 @@ static uint32_t x86emu_parity_tab[8] = {
 
 static UINT16 DECLSPEC_ALIGN(4096) bopcode[4096 / sizeof(UINT16)];
 static UINT16 DECLSPEC_ALIGN(4096) unxcode[4096 / sizeof(UINT16)];
+
+/* Temporary, per-title diagnostic: no emulator policy changes. */
+static BOOL burnout_fault_diagnostic;
+static LONG burnout_fault_count;
 
 typedef UINT64 unixlib_handle_t;
 NTSTATUS(WINAPI* __wine_unix_call_dispatcher)(unixlib_handle_t, unsigned int, void*);
@@ -271,9 +278,13 @@ NTSTATUS WINAPI BTCpuProcessInit(void)
         char* shortname = strrchr(filename, '\\');
         if (shortname) {
             shortname++;
+            burnout_fault_diagnostic = !_stricmp(shortname, "BurnoutParadise.exe");
             ApplyEnvFileEntry(shortname);
         }
     }
+
+    if (burnout_fault_diagnostic)
+        printf_log(LOG_NONE, "[WOW64-DIAG] Burnout read-fault capture enabled (limit 8)\n");
 
     PrintEnvVariables(&box64env, LOG_INFO);
 
@@ -314,12 +325,73 @@ static uint8_t box64_is_addr_in_jit(void* addr)
     return !!FindDynablockFromNativeAddress(addr);
 }
 
+static void log_fault_location(const char* label, uintptr_t pc)
+{
+    MEMORY_BASIC_INFORMATION info;
+    unsigned char bytes[16];
+    SIZE_T count = 0;
+    char hex[sizeof(bytes) * 3 + 1];
+    static const char digits[] = "0123456789abcdef";
+
+    if (NT_SUCCESS(NtQueryVirtualMemory(NtCurrentProcess(), (void*)pc,
+            MemoryBasicInformation, &info, sizeof(info), NULL)))
+        printf_log(LOG_NONE, "[WOW64-DIAG] %s=%p allocation=%p offset=%p type=%lx protect=%lx\n",
+            label, (void*)pc, info.AllocationBase,
+            (void*)(pc - (uintptr_t)info.AllocationBase), info.Type, info.Protect);
+
+    /* Never directly dereference guest code or stack in an exception handler. */
+    NTSTATUS status = NtReadVirtualMemory(NtCurrentProcess(), (void*)pc,
+        bytes, sizeof(bytes), &count);
+    if (!NT_SUCCESS(status) || count > sizeof(bytes)) {
+        printf_log(LOG_NONE, "[WOW64-DIAG] %s=%p bytes unavailable status=%lx\n", label, (void*)pc, status);
+        return;
+    }
+    for (SIZE_T i = 0; i < count; ++i) {
+        hex[i * 3] = digits[bytes[i] >> 4];
+        hex[i * 3 + 1] = digits[bytes[i] & 15];
+        hex[i * 3 + 2] = ' ';
+    }
+    hex[count * 3] = 0;
+    printf_log(LOG_NONE, "[WOW64-DIAG] %s=%p bytes=%s\n", label, (void*)pc, hex);
+}
+
+static void log_read_fault(EXCEPTION_RECORD* rec, CONTEXT* ctx, x64emu_t* emu)
+{
+    if (!burnout_fault_diagnostic || rec->ExceptionCode != EXCEPTION_ACCESS_VIOLATION
+        || rec->NumberParameters != 2 || rec->ExceptionInformation[0] != 0)
+        return;
+    /* Bound first-chance noise and any recursion caused by diagnostic APIs. */
+    LONG event = InterlockedIncrement(&burnout_fault_count);
+    if (event > 8) return;
+
+    dynablock_t* db = FindDynablockFromNativeAddress((void*)(uintptr_t)ctx->Pc);
+    uintptr_t guest_pc = db ? getX64Address(db, ctx->Pc) : 0;
+    printf_log(LOG_NONE, "[WOW64-DIAG] event=%ld tid=%u read=%p exception=%p native=%p lr=%p sp=%p jit=%d guest=%p\n",
+        event, (unsigned)GetTID(), (void*)rec->ExceptionInformation[1],
+        rec->ExceptionAddress, (void*)(uintptr_t)ctx->Pc, (void*)(uintptr_t)ctx->Lr,
+        (void*)(uintptr_t)ctx->Sp, !!db, (void*)guest_pc);
+    for (int i = 0; i < 28; i += 4)
+        printf_log(LOG_NONE, "[WOW64-DIAG] x%d=%p x%d=%p x%d=%p x%d=%p\n",
+            i, (void*)(uintptr_t)ctx->X[i], i + 1, (void*)(uintptr_t)ctx->X[i + 1],
+            i + 2, (void*)(uintptr_t)ctx->X[i + 2], i + 3, (void*)(uintptr_t)ctx->X[i + 3]);
+    log_fault_location("native-pc", ctx->Pc);
+    if (guest_pc) log_fault_location("mapped-guest-pc", guest_pc);
+    if (emu) {
+        /* Shadow registers can be stale while the JIT holds live values. */
+        printf_log(LOG_NONE, "[WOW64-DIAG] shadow eip=%08x esp=%08x ebp=%08x eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x\n",
+            (unsigned)R_RIP, R_ESP, R_EBP, R_EAX, R_EBX, R_ECX, R_EDX, R_ESI, R_EDI);
+        log_fault_location("shadow-guest-pc", R_RIP);
+    }
+}
+
 NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
 {
     printf_log(LOG_DEBUG, "BTCpuResetToConsistentState(%p)\n", ptrs);
     x64emu_t* emu = NtCurrentTeb()->TlsSlots[WOW64_TLS_EMU];
     EXCEPTION_RECORD* rec = ptrs->ExceptionRecord;
     CONTEXT* ctx = ptrs->ContextRecord;
+
+    log_read_fault(rec, ctx, emu);
 
     if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
         dynablock_t* db = NULL;
