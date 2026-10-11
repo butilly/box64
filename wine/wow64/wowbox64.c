@@ -27,6 +27,9 @@
 #include "hostext.h"
 #include "sysinfo.h"
 
+/* Not declared by the minimal MinGW winternl.h used for this target. */
+NTSTATUS WINAPI NtReadVirtualMemory(HANDLE, const void*, void*, SIZE_T, SIZE_T*);
+
 uintptr_t box64_pagesize = 4096;
 
 uint32_t default_gs = 0x2b;
@@ -363,8 +366,8 @@ static void log_read_fault(EXCEPTION_RECORD* rec, CONTEXT* ctx, x64emu_t* emu)
 
     dynablock_t* db = FindDynablockFromNativeAddress((void*)(uintptr_t)ctx->Pc);
     uintptr_t guest_pc = db ? getX64Address(db, ctx->Pc) : 0;
-    printf_log(LOG_NONE, "[WOW64-DIAG] event=%ld tid=%p read=%p exception=%p native=%p lr=%p sp=%p jit=%d guest=%p\n",
-        event, NtCurrentTeb()->ClientId.UniqueThread, (void*)rec->ExceptionInformation[1],
+    printf_log(LOG_NONE, "[WOW64-DIAG] event=%ld tid=%u read=%p exception=%p native=%p lr=%p sp=%p jit=%d guest=%p\n",
+        event, (unsigned)GetTID(), (void*)rec->ExceptionInformation[1],
         rec->ExceptionAddress, (void*)(uintptr_t)ctx->Pc, (void*)(uintptr_t)ctx->Lr,
         (void*)(uintptr_t)ctx->Sp, !!db, (void*)guest_pc);
     for (int i = 0; i < 28; i += 4)
