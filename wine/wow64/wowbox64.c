@@ -307,19 +307,32 @@ NTSTATUS WINAPI BTCpuProcessInit(void)
     return STATUS_SUCCESS;
 }
 
-static uint8_t box64_is_addr_in_jit(void* addr)
-{
-    if (!addr)
-        return FALSE;
-    return !!FindDynablockFromNativeAddress(addr);
-}
-
 NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
 {
+    static LONG diagnostic_count;
     printf_log(LOG_DEBUG, "BTCpuResetToConsistentState(%p)\n", ptrs);
     x64emu_t* emu = NtCurrentTeb()->TlsSlots[WOW64_TLS_EMU];
     EXCEPTION_RECORD* rec = ptrs->ExceptionRecord;
     CONTEXT* ctx = ptrs->ContextRecord;
+    /* Pc is a native ARM64 address, even for a 32-bit guest. */
+    dynablock_t* fault_db = FindDynablockFromNativeAddress((void*)(ULONG_PTR)ctx->Pc);
+
+    if (InterlockedIncrement(&diagnostic_count) <= 8) {
+        uintptr_t guest_pc = fault_db ? getX64Address(fault_db, ctx->Pc) : 0;
+        printf_log(LOG_NONE, "WOW64 fault: code=%08lx native_pc=%p sp=%p lr=%p jit=%d guest_pc=%p params=%lu access=%p address=%p\n",
+                   rec->ExceptionCode, (void*)(ULONG_PTR)ctx->Pc,
+                   (void*)(ULONG_PTR)ctx->Sp, (void*)(ULONG_PTR)ctx->Lr,
+                   fault_db != NULL, (void*)guest_pc, rec->NumberParameters,
+                   (void*)(rec->NumberParameters > 0 ? rec->ExceptionInformation[0] : 0),
+                   (void*)(rec->NumberParameters > 1 ? rec->ExceptionInformation[1] : 0));
+        if (guest_pc) {
+            MEMORY_BASIC_INFORMATION info;
+            if (!NtQueryVirtualMemory(NtCurrentProcess(), (void*)guest_pc, MemoryBasicInformation,
+                                      &info, sizeof(info), NULL))
+                printf_log(LOG_NONE, "WOW64 fault: guest_base=%p guest_offset=%p protect=%08lx\n",
+                           info.AllocationBase, (void*)(guest_pc - (uintptr_t)info.AllocationBase), info.Protect);
+        }
+    }
 
     if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
         dynablock_t* db = NULL;
@@ -335,7 +348,7 @@ NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
         }
     }
 
-    if (!box64_is_addr_in_jit(ULongToPtr(ctx->Pc)))
+    if (!fault_db)
         return STATUS_SUCCESS;
 
     /* Replace the host context with one captured before JIT entry so host code can unwind */
