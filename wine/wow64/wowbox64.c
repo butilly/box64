@@ -314,12 +314,69 @@ static uint8_t box64_is_addr_in_jit(void* addr)
     return !!FindDynablockFromNativeAddress(addr);
 }
 
+NTSTATUS WINAPI NtReadVirtualMemory(HANDLE, const void*, void*, SIZE_T, SIZE_T*);
+static LONG wow64_fault_reports;
+static LONG wow64_reentry_reports;
+
+/* Capture before Wine replaces the guest context for exception dispatch.
+ * Do not dereference an unreadable guest PC or a guard page for diagnostics. */
+static void log_wow64_fault(EXCEPTION_POINTERS* ptrs, x64emu_t* emu)
+{
+    EXCEPTION_RECORD* rec = ptrs->ExceptionRecord;
+    CONTEXT* host = ptrs->ContextRecord;
+    WOW64_CPURESERVED* cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPURESERVED];
+    WOW64_CONTEXT* guest = cpu ? (WOW64_CONTEXT*)(cpu + 1) : NULL;
+    MEMORY_BASIC_INFORMATION mbi = {0};
+    NTSTATUS status;
+    SIZE_T count = 0;
+    unsigned char bytes[15];
+    char text[15 * 3 + 1] = {0};
+    static const char hex[] = "0123456789abcdef";
+    unsigned int n;
+
+    if (InterlockedIncrement(&wow64_fault_reports) > 8 || !emu)
+        return;
+    printf_log(LOG_NONE, "WOW64-FAULT code=%08lx host_pc=%p host_sp=%p exception=%p params=%lu access=%p address=%p\n",
+               rec->ExceptionCode, (void*)(uintptr_t)host->Pc, (void*)(uintptr_t)host->Sp,
+               rec->ExceptionAddress, rec->NumberParameters,
+               (void*)(rec->NumberParameters > 0 ? rec->ExceptionInformation[0] : 0),
+               (void*)(rec->NumberParameters > 1 ? rec->ExceptionInformation[1] : 0));
+    printf_log(LOG_NONE, "WOW64-FAULT guest_ip=%p esp=%08x cs=%04x fsbase=%p saved_ip=%08lx saved_sp=%08lx\n",
+               (void*)(uintptr_t)R_RIP, R_ESP, R_CS, (void*)emu->segs_offs[_FS],
+               guest ? guest->Eip : 0, guest ? guest->Esp : 0);
+    printf_log(LOG_NONE, "WOW64-FAULT eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x ebp=%08x\n",
+               R_EAX, R_EBX, R_ECX, R_EDX, R_ESI, R_EDI, R_EBP);
+    status = NtQueryVirtualMemory(NtCurrentProcess(), (void*)(uintptr_t)R_RIP,
+                                  MemoryBasicInformation, &mbi, sizeof(mbi), NULL);
+    printf_log(LOG_NONE, "WOW64-FAULT query=%08lx allocation=%p region=%p size=%p state=%08lx protect=%08lx type=%08lx\n",
+               (ULONG)status, mbi.AllocationBase, mbi.BaseAddress, (void*)mbi.RegionSize,
+               mbi.State, mbi.Protect, mbi.Type);
+    if (!status && mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS))) {
+        uintptr_t end = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+        SIZE_T size = end > R_RIP ? end - R_RIP : 0;
+        if (size > sizeof(bytes)) size = sizeof(bytes);
+        if (size)
+            status = NtReadVirtualMemory(NtCurrentProcess(), (void*)(uintptr_t)R_RIP,
+                                         bytes, size, &count);
+        if (count > sizeof(bytes)) count = sizeof(bytes);
+        for (n = 0; n < count; ++n) {
+            text[n * 3] = hex[bytes[n] >> 4];
+            text[n * 3 + 1] = hex[bytes[n] & 15];
+            text[n * 3 + 2] = ' ';
+        }
+        printf_log(LOG_NONE, "WOW64-FAULT bytes=%lu [%s] read_status=%08lx\n",
+                   (ULONG)count, text, (ULONG)status);
+    }
+}
+
 NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
 {
     printf_log(LOG_DEBUG, "BTCpuResetToConsistentState(%p)\n", ptrs);
     x64emu_t* emu = NtCurrentTeb()->TlsSlots[WOW64_TLS_EMU];
     EXCEPTION_RECORD* rec = ptrs->ExceptionRecord;
     CONTEXT* ctx = ptrs->ContextRecord;
+
+    log_wow64_fault(ptrs, emu);
 
     if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
         dynablock_t* db = NULL;
@@ -335,7 +392,7 @@ NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
         }
     }
 
-    if (!box64_is_addr_in_jit(ULongToPtr(ctx->Pc)))
+    if (!box64_is_addr_in_jit((void*)(uintptr_t)ctx->Pc))
         return STATUS_SUCCESS;
 
     /* Replace the host context with one captured before JIT entry so host code can unwind */
@@ -356,6 +413,11 @@ void WINAPI BTCpuSimulate(void)
     x64emu_t* emu = NtCurrentTeb()->TlsSlots[WOW64_TLS_EMU];
     WOW64_CONTEXT* ctx = (WOW64_CONTEXT*)(cpu + 1);
     CONTEXT entry_context;
+
+    if (InterlockedCompareExchange(&wow64_fault_reports, 0, 0)
+        && InterlockedIncrement(&wow64_reentry_reports) <= 8)
+        printf_log(LOG_NONE, "WOW64-REENTRY eip=%08lx esp=%08lx cs=%04lx flags=%08lx previous_ip=%p\n",
+                   ctx->Eip, ctx->Esp, ctx->SegCs, cpu->Flags, (void*)(uintptr_t)R_RIP);
 
     RtlCaptureContext(&entry_context);
     NtCurrentTeb()->TlsSlots[WOW64_TLS_ENTRY_CONTEXT] = &entry_context;
