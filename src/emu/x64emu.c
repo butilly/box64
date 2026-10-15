@@ -1686,6 +1686,10 @@ uintptr_t GetSegmentBaseEmu(x64emu_t* emu, int seg)
 #ifdef BOX64EC
     if (seg == _GS)
         return emu->win64_teb;
+#endif
+#ifdef _WIN32
+    /* The Wine frontend supplies FSBASE (the 32-bit TEB for WOW64).
+     * Do not overwrite it with the unsupported OS selector lookup. */
     if (seg == _FS)
         return emu->segs_offs[_FS];
 #endif
