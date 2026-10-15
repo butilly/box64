@@ -338,8 +338,8 @@ static void log_guest_fault(EXCEPTION_RECORD* rec, const CONTEXT* ctx, dynablock
      * fixed guest GPR mapping from the fault context before it is replaced. */
     uint32_t pc = getX64Address(db, (uintptr_t)ctx->Pc);
     uint32_t sp = ctx->X[xRSP], bp = ctx->X[xRBP];
-    printf_log(LOG_NONE, "WOWBox64 guest fault: tid=%p host_pc=%p guest_pc=%08x access=%llu address=%p\n",
-        NtCurrentTeb()->ClientId.UniqueThread, (void*)(uintptr_t)ctx->Pc, pc,
+    printf_log(LOG_NONE, "WOWBox64 guest fault: teb=%p host_pc=%p guest_pc=%08x access=%llu address=%p\n",
+        NtCurrentTeb(), (void*)(uintptr_t)ctx->Pc, pc,
         rec->NumberParameters >= 1 ? (unsigned long long)rec->ExceptionInformation[0] : ~0ULL,
         rec->NumberParameters >= 2 ? (void*)rec->ExceptionInformation[1] : NULL);
     printf_log(LOG_NONE, "WOWBox64 guest regs: eax=%08x ecx=%08x edx=%08x ebx=%08x esp=%08x ebp=%08x esi=%08x edi=%08x\n",
