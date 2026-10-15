@@ -307,13 +307,6 @@ NTSTATUS WINAPI BTCpuProcessInit(void)
     return STATUS_SUCCESS;
 }
 
-static uint8_t box64_is_addr_in_jit(void* addr)
-{
-    if (!addr)
-        return FALSE;
-    return !!FindDynablockFromNativeAddress(addr);
-}
-
 NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
 {
     printf_log(LOG_DEBUG, "BTCpuResetToConsistentState(%p)\n", ptrs);
@@ -335,7 +328,15 @@ NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
         }
     }
 
-    if (!box64_is_addr_in_jit(ULongToPtr(ctx->Pc)))
+    /* Pc is a host ARM64 address, not a 32-bit guest pointer. */
+    dynablock_t* db = ctx->Pc ? FindDynablockFromNativeAddress((void*)(uintptr_t)ctx->Pc) : NULL;
+    static LONG fault_logs;
+    if (InterlockedIncrement(&fault_logs) <= 16) {
+        printf_log(LOG_NONE, "WOWBox64 host-pc fix: exception=%08x host_pc=%p jit=%d guest_pc=%p\n",
+            (unsigned)rec->ExceptionCode, (void*)(uintptr_t)ctx->Pc, !!db,
+            db ? (void*)getX64Address(db, (uintptr_t)ctx->Pc) : NULL);
+    }
+    if (!db)
         return STATUS_SUCCESS;
 
     /* Replace the host context with one captured before JIT entry so host code can unwind */
