@@ -23,6 +23,9 @@
 #endif
 
 #ifndef BOX64EC
+/* Exported by ntdll, but absent from the cross-toolchain's winternl.h. */
+NTSTATUS WINAPI NtReadVirtualMemory(HANDLE, const void*, void*, SIZE_T, SIZE_T*);
+
 /* Capture the guest before RtlRaiseException starts unwinding the host stack.
  * Linux signal diagnostics are not used by the WOW64 frontend. */
 static void log_wow64_sigill(x64emu_t* emu, void* addr, int code)
