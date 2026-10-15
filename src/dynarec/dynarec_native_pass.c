@@ -6,6 +6,9 @@
 #include <string.h>
 
 #include "os.h"
+#ifdef _WIN32
+#include <winternl.h>
+#endif
 #include "debug.h"
 #include "box64context.h"
 #include "box64cpu.h"
@@ -29,6 +32,23 @@
 #endif
 
 #if STEP == 0
+#ifdef _WIN32
+/* Wine owns the guest mappings; the Linux memprot tree is not authoritative.
+ * Never touch a guard page while speculatively decoding a block. */
+static uintptr_t dynarec_readable_end(uintptr_t addr)
+{
+    MEMORY_BASIC_INFORMATION mbi;
+    if (NtQueryVirtualMemory(NtCurrentProcess(), (void*)addr,
+            MemoryBasicInformation, &mbi, sizeof(mbi), NULL)
+        || mbi.State != MEM_COMMIT || (mbi.Protect & PAGE_GUARD)
+        || !(mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY
+                           | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE
+                           | PAGE_EXECUTE_WRITECOPY)))
+        return addr;
+    uintptr_t end = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+    return end > addr ? end : addr;
+}
+#endif
 #ifndef PROT_READ
 #define PROT_READ 0x1
 #endif
@@ -130,6 +150,9 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
     INIT;
     #if STEP == 0
     uintptr_t cur_page = ALIGN_DOWN(addr);
+    #ifdef _WIN32
+    uintptr_t readable_start = addr, readable_end = addr;
+    #endif
     #endif
     while(ok) {
         #if STEP > 0 && defined(HAVE_LEAFCALL)
@@ -138,6 +161,25 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
         #endif
         #if STEP == 0
         int stop_for_guard = 0;
+        #ifdef _WIN32
+        /* Validate the maximum x86 instruction window before prefix/opcode
+         * reads. Cache only within this pass, never across block builds. */
+        if (addr < readable_start || addr >= readable_end || readable_end - addr < 15) {
+            readable_start = addr;
+            readable_end = dynarec_readable_end(addr);
+            if (readable_end - addr < 15) {
+                static LONG reports;
+                if (InterlockedIncrement(&reports) <= 8)
+                    printf_log(LOG_NONE, "WOW64-DECODE stop unreadable window block=%p ip=%p inst=%d\n",
+                               (void*)dyn->start, (void*)addr, ninst);
+                /* Use the existing abort/truncate path; an actually executed
+                 * short boundary instruction remains the interpreter's job. */
+                dyn->size = ninst + 1; /* abort path removes the unbuilt instruction */
+                dyn->abort = 1;
+                return addr;
+            }
+        }
+        #endif
         if(cur_page != (ALIGN_DOWN(addr))) {
             cur_page = ALIGN_DOWN(addr);
             uint32_t prot = getProtection(addr);
@@ -294,6 +336,20 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
         rex.rep = 0;
         uint8_t prefix = x64_prefix_kind[pk];
         while(prefix && (prefix!=X64_PREFIX_REX || !is32bits)) {
+            #ifdef _WIN32
+            /* Fifteen prefix bytes cannot form a valid x86 instruction.
+             * In particular, do not walk prefix padding into an unmapped page. */
+            if (addr - ip >= 14) {
+                #if STEP == 0
+                static LONG reports;
+                if (InterlockedIncrement(&reports) <= 8)
+                    printf_log(LOG_NONE, "WOW64-DECODE stop overlong prefixes block=%p ip=%p inst=%d\n",
+                               (void*)dyn->start, (void*)ip, ninst);
+                #endif
+                dyn->abort = 1;
+                return ip;
+            }
+            #endif
             switch (prefix) {
                 case X64_PREFIX_LOCK: rex.isf0 = 1; rex.rex = 0; break;
                 case X64_PREFIX_REP_F2: rex.rep = 1; rex.rex = 0; break;
@@ -401,8 +457,13 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
             }
         }
         #else
-        // check if block need to be stopped, because it's a 00 00 opcode (unreadeable is already checked earlier)
-        if((ok>0) && !dyn->forward && (!(getProtection(addr+3)&PROT_READ) || !(*(uint32_t*)addr))) {
+        // check if block need to be stopped, because it's a 00 00 opcode
+        #ifdef _WIN32
+        int can_peek = addr >= readable_start && addr < readable_end && readable_end - addr >= 4;
+        #else
+        int can_peek = (getProtection(addr+3)&PROT_READ) != 0;
+        #endif
+        if((ok>0) && !dyn->forward && (!can_peek || !(*(uint32_t*)addr))) {
             if (dyn->need_dump) dynarec_log(LOG_NONE, "Stopping block at %p reason: %s\n", (void*)addr, "Next opcode is 00 00 00 00");
             ok = 0;
             need_epilog = 1;
@@ -433,7 +494,13 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
                 dyn->forward_ninst = 0;
             }
             // else just continue
-        } else if (!ok && !need_epilog && !dyn->peeking_flags && BOX64DRENV(dynarec_bigblock) && (getProtection(addr + 3) & ~PROT_READ))
+        } else if (!ok && !need_epilog && !dyn->peeking_flags && BOX64DRENV(dynarec_bigblock)
+        #ifdef _WIN32
+                   && can_peek
+        #else
+                   && (getProtection(addr + 3) & ~PROT_READ)
+        #endif
+                   )
             if(*(uint32_t*)addr!=0) {   // check if need to continue (but is next 4 bytes are 0, stop)
                 uintptr_t next = get_closest_next(dyn, addr);
                 if(next && (

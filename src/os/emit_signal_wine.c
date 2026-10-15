@@ -22,6 +22,57 @@
 
 #endif
 
+#ifndef BOX64EC
+/* Exported by ntdll, but absent from the cross-toolchain's winternl.h. */
+NTSTATUS WINAPI NtReadVirtualMemory(HANDLE, const void*, void*, SIZE_T, SIZE_T*);
+
+/* Capture the guest before RtlRaiseException starts unwinding the host stack.
+ * Linux signal diagnostics are not used by the WOW64 frontend. */
+static void log_wow64_sigill(x64emu_t* emu, void* addr, int code)
+{
+    static LONG reports;
+    static const char hex[] = "0123456789abcdef";
+    MEMORY_BASIC_INFORMATION mbi = {0};
+    SIZE_T count = 0;
+    NTSTATUS status;
+    char bytes[15 * 3 + 1];
+    unsigned int n;
+
+    /* CPU-feature probes can intentionally fault: never flood the log. */
+    if (InterlockedIncrement(&reports) > 8)
+        return;
+
+    printf_log(LOG_NONE, "WOW64-SIGILL guest_ip=%p signal_addr=%p code=%d cs=%04x esp=%08x ebp=%08x\n",
+               (void*)(uintptr_t)R_RIP, addr, code, R_CS, R_ESP, R_EBP);
+    printf_log(LOG_NONE, "WOW64-SIGILL eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x\n",
+               R_EAX, R_EBX, R_ECX, R_EDX, R_ESI, R_EDI);
+
+    status = NtQueryVirtualMemory(NtCurrentProcess(), (void*)(uintptr_t)R_RIP,
+                                  MemoryBasicInformation, &mbi, sizeof(mbi), &count);
+    if (!status)
+        printf_log(LOG_NONE, "WOW64-SIGILL allocation_base=%p offset=%p region=%p size=%p protect=%08lx type=%08lx\n",
+                   mbi.AllocationBase, (void*)((uintptr_t)R_RIP - (uintptr_t)mbi.AllocationBase),
+                   mbi.BaseAddress, (void*)mbi.RegionSize, mbi.Protect, mbi.Type);
+
+    /* Read one byte at a time so a page boundary cannot hide a short opcode.
+     * Do not dereference the guest PC: it may itself be invalid. */
+    for (n = 0; n < 15; ++n) {
+        unsigned char byte;
+        count = 0;
+        status = NtReadVirtualMemory(NtCurrentProcess(), (void*)((uintptr_t)R_RIP + n),
+                                    &byte, sizeof(byte), &count);
+        if (status || count != sizeof(byte))
+            break;
+        bytes[n * 3] = hex[byte >> 4];
+        bytes[n * 3 + 1] = hex[byte & 15];
+        bytes[n * 3 + 2] = ' ';
+    }
+    bytes[n * 3] = 0;
+    printf_log(LOG_NONE, "WOW64-SIGILL opcode_bytes=%u [%s] read_status=%08lx\n",
+               n, bytes, (ULONG)status);
+}
+#endif
+
 void EmitSignal(x64emu_t* emu, int sig, void* addr, int code)
 {
 #ifdef BOX64EC
@@ -68,6 +119,7 @@ void EmitSignal(x64emu_t* emu, int sig, void* addr, int code)
 
     switch (sig) {
         case X64_SIGILL:
+            log_wow64_sigill(emu, addr, code);
             printf_log(LOG_DEBUG, "SIGILL at %p with code %d\n", addr, code);
             rec.ExceptionCode = STATUS_ILLEGAL_INSTRUCTION;
             break;
