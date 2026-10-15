@@ -8,6 +8,7 @@
 #include "os.h"
 #ifdef _WIN32
 #include <winternl.h>
+#include "wine/compiler.h"
 #endif
 #include "debug.h"
 #include "box64context.h"
@@ -175,6 +176,8 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
                 /* Use the existing abort/truncate path; an actually executed
                  * short boundary instruction remains the interpreter's job. */
                 dyn->size = ninst + 1; /* abort path removes the unbuilt instruction */
+                if (ninst)
+                    dyn->insts[ninst - 1].x64.size = addr - dyn->insts[ninst - 1].x64.addr;
                 dyn->abort = 1;
                 return addr;
             }
