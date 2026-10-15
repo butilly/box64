@@ -26,6 +26,7 @@
 #include "wine/debug.h"
 #include "hostext.h"
 #include "sysinfo.h"
+#include "dynarec/arm64/arm64_mapping.h"
 
 uintptr_t box64_pagesize = 4096;
 
@@ -307,6 +308,72 @@ NTSTATUS WINAPI BTCpuProcessInit(void)
     return STATUS_SUCCESS;
 }
 
+static BOOL read_guest_diagnostic(uint32_t addr, void* data, SIZE_T size)
+{
+    SIZE_T read = 0;
+    if (!addr || size > 0x100000000ULL - addr)
+        return FALSE;
+    return NT_SUCCESS(NtReadVirtualMemory(NtCurrentProcess(), ULongToPtr(addr), data, size, &read)) && read == size;
+}
+
+static void log_guest_location(const char* label, unsigned index, uint32_t pc)
+{
+    MEMORY_BASIC_INFORMATION info;
+    if (NT_SUCCESS(NtQueryVirtualMemory(NtCurrentProcess(), ULongToPtr(pc), MemoryBasicInformation,
+                                      &info, sizeof(info), NULL)) && info.Type == MEM_IMAGE) {
+        printf_log(LOG_NONE, "WOWBox64 guest %s[%u]: pc=%08x image_base=%p rva=%08x\n",
+            label, index, pc, info.AllocationBase, pc - (uint32_t)(uintptr_t)info.AllocationBase);
+    } else {
+        printf_log(LOG_NONE, "WOWBox64 guest %s[%u]: pc=%08x (not an image)\n", label, index, pc);
+    }
+}
+
+static void log_guest_fault(EXCEPTION_RECORD* rec, const CONTEXT* ctx, dynablock_t* db)
+{
+    static LONG captures;
+    if (rec->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || InterlockedIncrement(&captures) > 4)
+        return;
+
+    /* The emu spill area can be stale while JIT code is running. Read the
+     * fixed guest GPR mapping from the fault context before it is replaced. */
+    uint32_t pc = getX64Address(db, (uintptr_t)ctx->Pc);
+    uint32_t sp = ctx->X[xRSP], bp = ctx->X[xRBP];
+    printf_log(LOG_NONE, "WOWBox64 guest fault: tid=%p host_pc=%p guest_pc=%08x access=%llu address=%p\n",
+        NtCurrentTeb()->ClientId.UniqueThread, (void*)(uintptr_t)ctx->Pc, pc,
+        rec->NumberParameters >= 1 ? (unsigned long long)rec->ExceptionInformation[0] : ~0ULL,
+        rec->NumberParameters >= 2 ? (void*)rec->ExceptionInformation[1] : NULL);
+    printf_log(LOG_NONE, "WOWBox64 guest regs: eax=%08x ecx=%08x edx=%08x ebx=%08x esp=%08x ebp=%08x esi=%08x edi=%08x\n",
+        (unsigned)ctx->X[xRAX], (unsigned)ctx->X[xRCX], (unsigned)ctx->X[xRDX], (unsigned)ctx->X[xRBX],
+        sp, bp, (unsigned)ctx->X[xRSI], (unsigned)ctx->X[xRDI]);
+    log_guest_location("fault", 0, pc);
+
+    uint32_t value;
+    if (read_guest_diagnostic(ctx->X[xRCX], &value, sizeof(value)))
+        printf_log(LOG_NONE, "WOWBox64 guest ecx memory: [%08x]=%08x\n", (unsigned)ctx->X[xRCX], value);
+    else
+        printf_log(LOG_NONE, "WOWBox64 guest ecx memory: unreadable\n");
+
+    /* Stack words are raw candidates, not an unwound call stack. Reading each
+     * word separately also preserves the return address near a guard page. */
+    for (unsigned i = 0; i < 16 && (uint64_t)sp + i * 4 <= 0xfffffffcULL; ++i) {
+        if (!read_guest_diagnostic(sp + i * 4, &value, sizeof(value))) {
+            printf_log(LOG_NONE, "WOWBox64 guest stack: unreadable at word %u\n", i);
+            break;
+        }
+        log_guest_location("stack-word", i, value);
+    }
+    for (unsigned i = 0; i < 8; ++i) {
+        uint32_t frame[2];
+        if ((bp & 3) || bp < sp || (uint64_t)bp - sp > 0x100000 ||
+            !read_guest_diagnostic(bp, frame, sizeof(frame)))
+            break;
+        log_guest_location("ebp-return", i, frame[1]);
+        if (frame[0] <= bp)
+            break;
+        bp = frame[0];
+    }
+}
+
 NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
 {
     printf_log(LOG_DEBUG, "BTCpuResetToConsistentState(%p)\n", ptrs);
@@ -338,6 +405,8 @@ NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
     }
     if (!db)
         return STATUS_SUCCESS;
+
+    log_guest_fault(rec, ctx, db);
 
     /* Replace the host context with one captured before JIT entry so host code can unwind */
     memcpy(ctx, NtCurrentTeb()->TlsSlots[WOW64_TLS_ENTRY_CONTEXT], sizeof(*ctx));
