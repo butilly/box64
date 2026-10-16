@@ -26,6 +26,7 @@
 #include "wine/debug.h"
 #include "hostext.h"
 #include "sysinfo.h"
+#include "dynarec/arm64/arm64_mapping.h"
 
 uintptr_t box64_pagesize = 4096;
 
@@ -307,11 +308,165 @@ NTSTATUS WINAPI BTCpuProcessInit(void)
     return STATUS_SUCCESS;
 }
 
-static uint8_t box64_is_addr_in_jit(void* addr)
+static BOOL read_guest_diagnostic(uint32_t addr, void* data, SIZE_T size)
 {
-    if (!addr)
+    SIZE_T read = 0;
+    if (!addr || size > 0x100000000ULL - addr)
         return FALSE;
-    return !!FindDynablockFromNativeAddress(addr);
+    return NT_SUCCESS(NtReadVirtualMemory(NtCurrentProcess(), ULongToPtr(addr), data, size, &read)) && read == size;
+}
+
+/* Diagnostic for the inspected, relocation-stripped AlanWake.exe only.
+ * Never patch guest code or replace the return values being observed. */
+int WowResourceTraceSite(uintptr_t pc)
+{
+    switch (pc) {
+    case 0x403527: /* cache candidate versus end */
+    case 0x403712: /* cached payload lookup returned */
+    case 0x403761: /* loose File::exists returned (AL, not EAX) */
+    case 0x403783: /* loose payload read returned */
+    case 0x40382f: /* BaseFile result returned to font loader */
+        break;
+    default:
+        return 0;
+    }
+    IMAGE_DOS_HEADER dos;
+    IMAGE_NT_HEADERS32 nt;
+    MEMORY_BASIC_INFORMATION info;
+    static const unsigned char lookup[] = {0xe8,0x4e,0xfd,0xff,0xff,0x8b,0xf8,0x85,0xff,0x74,0x2e};
+    static const unsigned char exists[] = {0xff,0x15,0x50,0x0b,0x63,0x00,0x84,0xc0,0x75,0x07};
+    unsigned char code[sizeof(lookup)], fallback[sizeof(exists)];
+    if (!NT_SUCCESS(NtQueryVirtualMemory(NtCurrentProcess(), (void*)pc, MemoryBasicInformation,
+                                         &info, sizeof(info), NULL)) ||
+        info.Type != MEM_IMAGE || info.AllocationBase != (void*)0x400000 ||
+        !read_guest_diagnostic(0x400000, &dos, sizeof(dos)) || dos.e_magic != IMAGE_DOS_SIGNATURE ||
+        dos.e_lfanew < 0 || dos.e_lfanew > 0x1000 ||
+        !read_guest_diagnostic(0x400000 + dos.e_lfanew, &nt, sizeof(nt)) ||
+        nt.Signature != IMAGE_NT_SIGNATURE || nt.FileHeader.Machine != IMAGE_FILE_MACHINE_I386 ||
+        nt.OptionalHeader.SizeOfImage != 0x3a1000 || nt.OptionalHeader.AddressOfEntryPoint != 0x2030f5 ||
+        nt.OptionalHeader.CheckSum != 0x2f5f47 ||
+        !read_guest_diagnostic(0x40370d, code, sizeof(code)) || memcmp(code, lookup, sizeof(code)) ||
+        !read_guest_diagnostic(0x40375b, fallback, sizeof(fallback)) || memcmp(fallback, exists, sizeof(fallback)))
+        return 0;
+    return 1;
+}
+
+static int read_resource_name(uint32_t addr, char* name, size_t size)
+{
+    for (size_t i = 0; i < size; ++i) {
+        unsigned char c;
+        if (addr > UINT32_MAX - i || !read_guest_diagnostic(addr + i, &c, 1)) return 0;
+        name[i] = c;
+        if (!c) return 1;
+        if (c < 32 || c > 126) return 0;
+    }
+    return 0;
+}
+
+void WowResourceTrace(x64emu_t* emu, uintptr_t pc, int unused)
+{
+    static LONG captures[5];
+    unsigned slot;
+    uint32_t sp = emu->regs[_SP].dword[0], nameptr = emu->regs[_BX].dword[0];
+    uint32_t result = emu->regs[_AX].dword[0], detail = 0;
+    char name[160], converted[160];
+    const char* stage;
+    switch (pc) {
+    case 0x403527:
+        slot = 0; stage = "cache-candidate";
+        if (sp > UINT32_MAX - 0x230 || !read_guest_diagnostic(sp + 0x230, &nameptr, 4)) return;
+        break;
+    case 0x403712: slot = 1; stage = "cache-return"; break;
+    case 0x403761: slot = 2; stage = "loose-exists"; result &= 0xff; break;
+    case 0x403783: slot = 3; stage = "loose-read"; break;
+    case 0x40382f: slot = 4; stage = "file-return"; break;
+    default: return;
+    }
+    if (!read_resource_name(nameptr, name, sizeof(name))) return;
+    const char* prefix = "fonts/";
+    for (unsigned i = 0; i < 6; ++i) {
+        unsigned char c = name[i];
+        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        if (c == '\\') c = '/';
+        if (c != prefix[i]) return;
+    }
+    if (InterlockedIncrement(&captures[slot]) > 32) return;
+    printf_log(LOG_NONE, "WOWBox64 resource: stage=%s teb=%p pc=%08x name=%s result=%08x\n",
+        stage, NtCurrentTeb(), (unsigned)pc, name, result);
+    if (slot == 0) {
+        uint32_t entry = emu->regs[_SI].dword[0], fields[3];
+        int found = entry != result;
+        int readable = found && entry <= UINT32_MAX - 0x120 &&
+            read_guest_diagnostic(entry + 0x114, fields, sizeof(fields));
+        printf_log(LOG_NONE, "WOWBox64 resource cache: entry=%08x end=%08x found=%d readable=%d ready=%u data=%08x size=%u\n",
+            entry, result, found, readable, readable ? fields[0] & 0xff : 0,
+            readable ? fields[1] : 0, readable ? fields[2] : 0);
+    } else if (slot == 2) {
+        if (sp <= UINT32_MAX - 0x14 && read_resource_name(sp + 0x14, converted, sizeof(converted)))
+            printf_log(LOG_NONE, "WOWBox64 resource fallback: path=%s exists=%u\n", converted, result);
+    } else if (slot == 1 || slot == 3) {
+        int readable = sp <= UINT32_MAX - 0xc && read_guest_diagnostic(sp + 0xc, &detail, 4);
+        printf_log(LOG_NONE, "WOWBox64 resource payload: size_readable=%d size_raw=%u valid_only_if_result_nonzero=1\n",
+            readable, detail);
+    }
+}
+
+static void log_guest_location(const char* label, unsigned index, uint32_t pc)
+{
+    MEMORY_BASIC_INFORMATION info;
+    if (NT_SUCCESS(NtQueryVirtualMemory(NtCurrentProcess(), ULongToPtr(pc), MemoryBasicInformation,
+                                      &info, sizeof(info), NULL)) && info.Type == MEM_IMAGE) {
+        printf_log(LOG_NONE, "WOWBox64 guest %s[%u]: pc=%08x image_base=%p rva=%08x\n",
+            label, index, pc, info.AllocationBase, pc - (uint32_t)(uintptr_t)info.AllocationBase);
+    } else {
+        printf_log(LOG_NONE, "WOWBox64 guest %s[%u]: pc=%08x (not an image)\n", label, index, pc);
+    }
+}
+
+static void log_guest_fault(EXCEPTION_RECORD* rec, const CONTEXT* ctx, dynablock_t* db)
+{
+    static LONG captures;
+    if (rec->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || InterlockedIncrement(&captures) > 4)
+        return;
+
+    /* The emu spill area can be stale while JIT code is running. Read the
+     * fixed guest GPR mapping from the fault context before it is replaced. */
+    uint32_t pc = getX64Address(db, (uintptr_t)ctx->Pc);
+    uint32_t sp = ctx->X[xRSP], bp = ctx->X[xRBP];
+    printf_log(LOG_NONE, "WOWBox64 guest fault: teb=%p host_pc=%p guest_pc=%08x access=%llu address=%p\n",
+        NtCurrentTeb(), (void*)(uintptr_t)ctx->Pc, pc,
+        rec->NumberParameters >= 1 ? (unsigned long long)rec->ExceptionInformation[0] : ~0ULL,
+        rec->NumberParameters >= 2 ? (void*)rec->ExceptionInformation[1] : NULL);
+    printf_log(LOG_NONE, "WOWBox64 guest regs: eax=%08x ecx=%08x edx=%08x ebx=%08x esp=%08x ebp=%08x esi=%08x edi=%08x\n",
+        (unsigned)ctx->X[xRAX], (unsigned)ctx->X[xRCX], (unsigned)ctx->X[xRDX], (unsigned)ctx->X[xRBX],
+        sp, bp, (unsigned)ctx->X[xRSI], (unsigned)ctx->X[xRDI]);
+    log_guest_location("fault", 0, pc);
+
+    uint32_t value;
+    if (read_guest_diagnostic(ctx->X[xRCX], &value, sizeof(value)))
+        printf_log(LOG_NONE, "WOWBox64 guest ecx memory: [%08x]=%08x\n", (unsigned)ctx->X[xRCX], value);
+    else
+        printf_log(LOG_NONE, "WOWBox64 guest ecx memory: unreadable\n");
+
+    /* Stack words are raw candidates, not an unwound call stack. Reading each
+     * word separately also preserves the return address near a guard page. */
+    for (unsigned i = 0; i < 16 && (uint64_t)sp + i * 4 <= 0xfffffffcULL; ++i) {
+        if (!read_guest_diagnostic(sp + i * 4, &value, sizeof(value))) {
+            printf_log(LOG_NONE, "WOWBox64 guest stack: unreadable at word %u\n", i);
+            break;
+        }
+        log_guest_location("stack-word", i, value);
+    }
+    for (unsigned i = 0; i < 8; ++i) {
+        uint32_t frame[2];
+        if ((bp & 3) || bp < sp || (uint64_t)bp - sp > 0x100000 ||
+            !read_guest_diagnostic(bp, frame, sizeof(frame)))
+            break;
+        log_guest_location("ebp-return", i, frame[1]);
+        if (frame[0] <= bp)
+            break;
+        bp = frame[0];
+    }
 }
 
 NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
@@ -335,8 +490,18 @@ NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
         }
     }
 
-    if (!box64_is_addr_in_jit(ULongToPtr(ctx->Pc)))
+    /* Pc is a host ARM64 address, not a 32-bit guest pointer. */
+    dynablock_t* db = ctx->Pc ? FindDynablockFromNativeAddress((void*)(uintptr_t)ctx->Pc) : NULL;
+    static LONG fault_logs;
+    if (InterlockedIncrement(&fault_logs) <= 16) {
+        printf_log(LOG_NONE, "WOWBox64 host-pc fix: exception=%08x host_pc=%p jit=%d guest_pc=%p\n",
+            (unsigned)rec->ExceptionCode, (void*)(uintptr_t)ctx->Pc, !!db,
+            db ? (void*)getX64Address(db, (uintptr_t)ctx->Pc) : NULL);
+    }
+    if (!db)
         return STATUS_SUCCESS;
+
+    log_guest_fault(rec, ctx, db);
 
     /* Replace the host context with one captured before JIT entry so host code can unwind */
     memcpy(ctx, NtCurrentTeb()->TlsSlots[WOW64_TLS_ENTRY_CONTEXT], sizeof(*ctx));
