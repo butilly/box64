@@ -305,7 +305,7 @@ NTSTATUS WINAPI BTCpuProcessInit(void)
 
     InitX64Trace(&box64_context);
 
-    printf_log(LOG_NONE, "WOWBox64 resource diagnostic v2: enabled; fingerprinted lookup sites only\n");
+    printf_log(LOG_NONE, "WOWBox64 resource diagnostic v3: enabled; fonts/ and data/fonts/ lookup sites\n");
 
     return STATUS_SUCCESS;
 }
@@ -398,17 +398,27 @@ void WowResourceTrace(x64emu_t* emu, uintptr_t pc, int unused)
         printf_log(LOG_NONE, "WOWBox64 resource probe: stage=%s pc=%08x nameptr=%08x readable=%d prefix=%.6s result=%08x\n",
             stage, (unsigned)pc, nameptr, name_readable, name_readable ? name : "", result);
     if (!name_readable) return;
-    const char* prefix = "fonts/";
-    for (unsigned i = 0; i < 6; ++i) {
+    /* The renderer supplies data\fonts\..., while other resource callers use
+     * root-relative names. Normalize only this local diagnostic copy. */
+    char normalized[sizeof(name)];
+    size_t length = strlen(name);
+    for (size_t i = 0; i <= length; ++i) {
         unsigned char c = name[i];
         if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
         if (c == '\\') c = '/';
-        if (c != prefix[i]) return;
+        normalized[i] = c;
     }
+    const char* relative = normalized;
+    if (!strncmp(relative, "data/", 5)) relative += 5;
+    if (strncmp(relative, "fonts/", 6)) return;
     if (InterlockedIncrement(&captures[slot]) > 32) return;
     printf_log(LOG_NONE, "WOWBox64 resource: stage=%s teb=%p pc=%08x name=%s result=%08x\n",
         stage, NtCurrentTeb(), (unsigned)pc, name, result);
     if (slot == 0) {
+        /* This is the converted key passed into the cache search, not a
+         * replacement path. Keep the original name in the line above. */
+        if (sp <= UINT32_MAX - 0x120 && read_resource_name(sp + 0x120, converted, sizeof(converted)))
+            printf_log(LOG_NONE, "WOWBox64 resource cache-key: path=%s\n", converted);
         uint32_t entry = emu->regs[_SI].dword[0], fields[3];
         int found = entry != result;
         int readable = found && entry <= UINT32_MAX - 0x120 &&
