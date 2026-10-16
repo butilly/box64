@@ -154,7 +154,7 @@ import_dll(ntdll)
 import_dll(wow64)
 
 # always enable DynaRec, only supports ARM64 for now.
-add_compile_definitions(DYNAREC ARM64)
+add_compile_definitions(DYNAREC ARM64 WOWBOX64_RESOURCE_DIAGNOSTIC)
 
 target_compile_options(wowbox64 PRIVATE -Wno-inconsistent-dllimport)
 target_link_options(wowbox64 PRIVATE -nostdlib -nodefaultlibs 

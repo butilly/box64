@@ -1686,6 +1686,10 @@ uintptr_t GetSegmentBaseEmu(x64emu_t* emu, int seg)
 #ifdef BOX64EC
     if (seg == _GS)
         return emu->win64_teb;
+#endif
+#ifdef _WIN32
+    /* Wine supplies FSBASE at guest entry and context reset. Its selector
+     * lookup is unsupported and would replace the WOW64 TEB with NULL. */
     if (seg == _FS)
         return emu->segs_offs[_FS];
 #endif
