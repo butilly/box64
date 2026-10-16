@@ -305,7 +305,7 @@ NTSTATUS WINAPI BTCpuProcessInit(void)
 
     InitX64Trace(&box64_context);
 
-    printf_log(LOG_NONE, "WOWBox64 resource diagnostic v3: enabled; fonts/ and data/fonts/ lookup sites\n");
+    printf_log(LOG_NONE, "WOWBox64 resource diagnostic v4: enabled; archive registration, precache gates and font lookup\n");
 
     return STATUS_SUCCESS;
 }
@@ -320,6 +320,8 @@ static BOOL read_guest_diagnostic(uint32_t addr, void* data, SIZE_T size)
 
 /* Diagnostic for the inspected, relocation-stripped AlanWake.exe only.
  * Never patch guest code or replace the return values being observed. */
+static int archive_trace_site(uintptr_t pc);
+
 int WowResourceTraceSite(uintptr_t pc)
 {
     unsigned slot;
@@ -329,8 +331,11 @@ int WowResourceTraceSite(uintptr_t pc)
     case 0x403761: slot = 2; break; /* loose File::exists returned (AL, not EAX) */
     case 0x403783: slot = 3; break; /* loose payload read returned */
     case 0x40382f: slot = 4; break; /* BaseFile result returned to font loader */
+    case 0x402b1e: slot = 5; break; /* existence gate before precache insertion */
+    case 0x402b6c: slot = 6; break; /* pending cache entry inserted */
+    case 0x403449: slot = 7; break; /* loader callback has published payload */
     default:
-        return 0;
+        return archive_trace_site(pc);
     }
     IMAGE_DOS_HEADER dos = {0};
     IMAGE_NT_HEADERS32 nt = {0};
@@ -352,7 +357,15 @@ int WowResourceTraceSite(uintptr_t pc)
         checks |= 4;
     if (read_guest_diagnostic(0x40370d, code, sizeof(code)) && !memcmp(code, lookup, sizeof(code))) checks |= 8;
     if (read_guest_diagnostic(0x40375b, fallback, sizeof(fallback)) && !memcmp(fallback, exists, sizeof(fallback))) checks |= 16;
-    static LONG reported[5];
+    if (slot >= 5) {
+        static const unsigned char extra[3][7] = {
+            {0x84,0xc0,0x0f,0x84,0x91,0x00,0x00},
+            {0x8d,0x8c,0x24,0x10,0x01,0x00,0x00},
+            {0x5f,0x5e,0x64,0x89,0x0d,0x00,0x00},
+        };
+        if (!read_guest_diagnostic(pc, code, 7) || memcmp(code, extra[slot - 5], 7)) checks &= ~8;
+    }
+    static LONG reported[8];
     if (InterlockedCompareExchange(&reported[slot], 1, 0) == 0)
         printf_log(LOG_NONE, "WOWBox64 resource hook: pc=%08x checks=%02x expected=1f type=%08x base=%p image=%08x entry=%08x checksum=%08x\n",
             (unsigned)pc, checks, (unsigned)info.Type, info.AllocationBase,
@@ -373,10 +386,135 @@ static int read_resource_name(uint32_t addr, char* name, size_t size)
     return 0;
 }
 
+static int is_font_resource(const char* name)
+{
+    char normalized[160];
+    size_t length = strlen(name);
+    if (length >= sizeof(normalized)) return 0;
+    for (size_t i = 0; i <= length; ++i) {
+        unsigned char c = name[i];
+        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        if (c == '\\') c = '/';
+        normalized[i] = c;
+    }
+    const char* relative = normalized;
+    if (!strncmp(relative, "data/", 5)) relative += 5;
+    return !strncmp(relative, "fonts/", 6);
+}
+
+/* DLL probes use RVAs so a different load address is harmless. The cheap
+ * low-word filter avoids a virtual-memory query for every guest instruction.
+ * All signatures exclude absolute operands relocated by the loader. */
+static const struct {
+    uint32_t rva;
+    const char* stage;
+    unsigned size;
+    unsigned char code[8];
+} archive_sites[] = {
+    {0x07099, "exists-dispatch", 5, {0x8b,0x10,0x8b,0x52,0x0c}},
+    {0x0e570, "pack-entry", 5, {0x85,0xc0,0x74,0x10,0x50}},
+    {0x0e57c, "pack-entry-rejected", 6, {0x84,0xc0,0x75,0x04,0xb0,0x01}},
+    {0x0f69a, "archive-discovery", 6, {0x8b,0x44,0x24,0x10,0x33,0xf6}},
+    {0x111f6, "archive-candidate", 5, {0x8b,0xf8,0x83,0xff,0xff}},
+    {0x1148d, "index-exists", 8, {0x84,0xc0,0x0f,0x84,0x12,0x05,0x00,0x00}},
+    {0x114a9, "index-open", 8, {0x8b,0xf0,0x85,0xf6,0x0f,0x84,0xf4,0x04}},
+    {0x114e6, "index-header-read", 8, {0x57,0x8d,0x8c,0x24,0xe8,0x00,0x00,0x00}},
+    {0x119cc, "archive-candidate-done", 7, {0x8d,0x8c,0x24,0x88,0x02,0x00,0x00}},
+    {0x11b7c, "archive-refresh-done", 6, {0x33,0xdb,0x89,0x5c,0x24,0x10}},
+    {0x122f1, "pack-constructed", 6, {0x8b,0x4c,0x24,0x0c,0x8b,0xc6}},
+};
+
+static int archive_slot(uintptr_t pc)
+{
+    for (unsigned i = 0; i < sizeof(archive_sites) / sizeof(archive_sites[0]); ++i)
+        if ((pc & 0xffff) == (archive_sites[i].rva & 0xffff)) return i;
+    return -1;
+}
+
+static int archive_trace_site(uintptr_t pc)
+{
+    int slot = archive_slot(pc);
+    if (slot < 0 || pc > UINT32_MAX || pc < archive_sites[slot].rva) return 0;
+    if (!WowResourceTraceSite(0x403527)) return 0; /* exact executable too */
+    uint32_t base = pc - archive_sites[slot].rva;
+    IMAGE_DOS_HEADER dos = {0};
+    IMAGE_NT_HEADERS32 nt = {0};
+    MEMORY_BASIC_INFORMATION info = {0};
+    unsigned char code[8];
+    if (!NT_SUCCESS(NtQueryVirtualMemory(NtCurrentProcess(), (void*)pc, MemoryBasicInformation,
+                                        &info, sizeof(info), NULL)) ||
+        info.Type != MEM_IMAGE || info.AllocationBase != ULongToPtr(base) ||
+        !read_guest_diagnostic(base, &dos, sizeof(dos)) || dos.e_magic != IMAGE_DOS_SIGNATURE ||
+        dos.e_lfanew < 0 || dos.e_lfanew > 0x1000 || base > UINT32_MAX - 0x85000 ||
+        !read_guest_diagnostic(base + dos.e_lfanew, &nt, sizeof(nt)) ||
+        nt.Signature != IMAGE_NT_SIGNATURE || nt.FileHeader.Machine != IMAGE_FILE_MACHINE_I386 ||
+        nt.OptionalHeader.SizeOfImage != 0x85000 || nt.OptionalHeader.AddressOfEntryPoint != 0x3d527 ||
+        nt.OptionalHeader.CheckSum != 0x72bc5 ||
+        !read_guest_diagnostic(pc, code, archive_sites[slot].size) ||
+        memcmp(code, archive_sites[slot].code, archive_sites[slot].size)) return 0;
+    static LONG reported[sizeof(archive_sites) / sizeof(archive_sites[0])];
+    if (InterlockedCompareExchange(&reported[slot], 1, 0) == 0)
+        printf_log(LOG_NONE, "WOWBox64 archive hook: stage=%s base=%08x rva=%08x fingerprint=accepted\n",
+            archive_sites[slot].stage, base, archive_sites[slot].rva);
+    return 1;
+}
+
+/* Invalid or overflowing reads are explicit; a missing field is not zero. */
+static uint32_t diagnostic_u32(uint32_t addr, uint32_t offset)
+{
+    uint32_t value;
+    if (!addr || addr > UINT32_MAX - offset || !read_guest_diagnostic(addr + offset, &value, 4))
+        return UINT32_MAX;
+    return value;
+}
+
+static void trace_archive(x64emu_t* emu, uintptr_t pc)
+{
+    int slot = archive_slot(pc);
+    if (slot < 0) return;
+    static LONG captures[sizeof(archive_sites) / sizeof(archive_sites[0])];
+    uint32_t rva = archive_sites[slot].rva, base = pc - rva;
+    uint32_t sp = emu->regs[_SP].dword[0], ax = emu->regs[_AX].dword[0];
+    uint32_t si = emu->regs[_SI].dword[0], di = emu->regs[_DI].dword[0];
+    uint32_t owner = emu->regs[_BP].dword[0], nameptr = 0, count = UINT32_MAX;
+    uint32_t pack = diagnostic_u32(base, 0x66cfc);
+    char name[160] = {0};
+    switch (rva) {
+    case 0x07099: nameptr = sp; owner = ax; break;
+    case 0x0e570: case 0x0e57c: nameptr = di; owner = si; break;
+    case 0x0f69a:
+        nameptr = diagnostic_u32(sp, 0xc0); owner = di;
+        count = diagnostic_u32(sp, 0x10); break;
+    case 0x111f6: case 0x119cc:
+        nameptr = diagnostic_u32(sp, 0x288); break;
+    case 0x1148d: case 0x114a9: case 0x114e6:
+        nameptr = diagnostic_u32(sp, 0x4f8); break;
+    case 0x11b7c: case 0x122f1: owner = si; break;
+    }
+    int readable = nameptr && read_resource_name(nameptr, name, sizeof(name));
+    if (rva <= 0xe57c && (!readable || !is_font_resource(name))) return;
+    if (rva == 0x0e57c || rva == 0x1148d) ax &= 0xff; /* bool returns are AL */
+    LONG n = InterlockedIncrement(&captures[slot]);
+    if (n > 64) {
+        if (n == 65) printf_log(LOG_NONE, "WOWBox64 archive: stage=%s capture-limit=64\n", archive_sites[slot].stage);
+        return;
+    }
+    uint32_t vtable = diagnostic_u32(owner, 0);
+    printf_log(LOG_NONE, "WOWBox64 archive: stage=%s teb=%p path_readable=%d path=%s result=%08x owner=%08x pack=%08x mounted=%u discovered=%u vtable=%08x exists_target=%08x unreadable=ffffffff\n",
+        archive_sites[slot].stage, NtCurrentTeb(), readable, readable ? name : "<unreadable-or-none>",
+        ax, owner, pack, diagnostic_u32(pack, 0xc), count, vtable, diagnostic_u32(vtable, 0xc));
+    if (rva == 0x119cc)
+        printf_log(LOG_NONE, "WOWBox64 archive progress: candidate_index=%u previous_order=%u mounted=%u\n",
+            diagnostic_u32(sp, 0x38), diagnostic_u32(sp, 0x28), diagnostic_u32(owner, 0xc));
+    if (rva == 0x114e6)
+        printf_log(LOG_NONE, "WOWBox64 archive header: read_return=%u expected=144 directories_raw=%08x files_raw=%08x names_bytes_raw=%08x before_endian_conversion=1\n",
+            ax, diagnostic_u32(sp, 0xe8), diagnostic_u32(sp, 0xec), diagnostic_u32(sp, 0xf0));
+}
+
 void WowResourceTrace(x64emu_t* emu, uintptr_t pc, int unused)
 {
-    static LONG captures[5];
-    static LONG probes[5];
+    static LONG captures[8];
+    static LONG probes[8];
     unsigned slot;
     uint32_t sp = emu->regs[_SP].dword[0], nameptr = emu->regs[_BX].dword[0];
     uint32_t result = emu->regs[_AX].dword[0], detail = 0;
@@ -391,26 +529,23 @@ void WowResourceTrace(x64emu_t* emu, uintptr_t pc, int unused)
     case 0x403761: slot = 2; stage = "loose-exists"; result &= 0xff; break;
     case 0x403783: slot = 3; stage = "loose-read"; break;
     case 0x40382f: slot = 4; stage = "file-return"; break;
-    default: return;
+    case 0x402b1e: case 0x402b6c:
+        slot = pc == 0x402b1e ? 5 : 6;
+        stage = slot == 5 ? "precache-exists" : "precache-insert";
+        nameptr = diagnostic_u32(sp, 0x234);
+        if (slot == 5) result &= 0xff;
+        break;
+    case 0x403449:
+        slot = 7; stage = "precache-complete";
+        nameptr = emu->regs[_DI].dword[0]; break;
+    default: trace_archive(emu, pc); return;
     }
     int name_readable = read_resource_name(nameptr, name, sizeof(name));
     if (InterlockedIncrement(&probes[slot]) <= 4)
         printf_log(LOG_NONE, "WOWBox64 resource probe: stage=%s pc=%08x nameptr=%08x readable=%d prefix=%.6s result=%08x\n",
             stage, (unsigned)pc, nameptr, name_readable, name_readable ? name : "", result);
     if (!name_readable) return;
-    /* The renderer supplies data\fonts\..., while other resource callers use
-     * root-relative names. Normalize only this local diagnostic copy. */
-    char normalized[sizeof(name)];
-    size_t length = strlen(name);
-    for (size_t i = 0; i <= length; ++i) {
-        unsigned char c = name[i];
-        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
-        if (c == '\\') c = '/';
-        normalized[i] = c;
-    }
-    const char* relative = normalized;
-    if (!strncmp(relative, "data/", 5)) relative += 5;
-    if (strncmp(relative, "fonts/", 6)) return;
+    if (!is_font_resource(name)) return;
     if (InterlockedIncrement(&captures[slot]) > 32) return;
     printf_log(LOG_NONE, "WOWBox64 resource: stage=%s teb=%p pc=%08x name=%s result=%08x\n",
         stage, NtCurrentTeb(), (unsigned)pc, name, result);
@@ -429,6 +564,14 @@ void WowResourceTrace(x64emu_t* emu, uintptr_t pc, int unused)
     } else if (slot == 2) {
         if (sp <= UINT32_MAX - 0x14 && read_resource_name(sp + 0x14, converted, sizeof(converted)))
             printf_log(LOG_NONE, "WOWBox64 resource fallback: path=%s exists=%u\n", converted, result);
+    } else if (slot == 5 || slot == 6) {
+        uint32_t owner = emu->regs[_SI].dword[0];
+        printf_log(LOG_NONE, "WOWBox64 precache: owner=%08x entries=%u base=%08x unreadable=ffffffff\n",
+            owner, diagnostic_u32(owner, 0x14), diagnostic_u32(owner, 0x10));
+    } else if (slot == 7) {
+        uint32_t entry = emu->regs[_SI].dword[0];
+        printf_log(LOG_NONE, "WOWBox64 precache complete: fields=%08x ready=%08x data=%08x size=%u unreadable=ffffffff\n",
+            entry, diagnostic_u32(entry, 0), diagnostic_u32(entry, 4), diagnostic_u32(entry, 8));
     } else if (slot == 1 || slot == 3) {
         int readable = sp <= UINT32_MAX - 0xc && read_guest_diagnostic(sp + 0xc, &detail, 4);
         printf_log(LOG_NONE, "WOWBox64 resource payload: size_readable=%d size_raw=%u valid_only_if_result_nonzero=1\n",
