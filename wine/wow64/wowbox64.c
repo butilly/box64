@@ -391,8 +391,8 @@ void WowResourceTrace(x64emu_t* emu, uintptr_t pc, int unused)
         if (c != prefix[i]) return;
     }
     if (InterlockedIncrement(&captures[slot]) > 32) return;
-    printf_log(LOG_NONE, "WOWBox64 resource: stage=%s tid=%p pc=%08x name=%s result=%08x\n",
-        stage, NtCurrentTeb()->ClientId.UniqueThread, (unsigned)pc, name, result);
+    printf_log(LOG_NONE, "WOWBox64 resource: stage=%s teb=%p pc=%08x name=%s result=%08x\n",
+        stage, NtCurrentTeb(), (unsigned)pc, name, result);
     if (slot == 0) {
         uint32_t entry = emu->regs[_SI].dword[0], fields[3];
         int found = entry != result;
@@ -433,8 +433,8 @@ static void log_guest_fault(EXCEPTION_RECORD* rec, const CONTEXT* ctx, dynablock
      * fixed guest GPR mapping from the fault context before it is replaced. */
     uint32_t pc = getX64Address(db, (uintptr_t)ctx->Pc);
     uint32_t sp = ctx->X[xRSP], bp = ctx->X[xRBP];
-    printf_log(LOG_NONE, "WOWBox64 guest fault: tid=%p host_pc=%p guest_pc=%08x access=%llu address=%p\n",
-        NtCurrentTeb()->ClientId.UniqueThread, (void*)(uintptr_t)ctx->Pc, pc,
+    printf_log(LOG_NONE, "WOWBox64 guest fault: teb=%p host_pc=%p guest_pc=%08x access=%llu address=%p\n",
+        NtCurrentTeb(), (void*)(uintptr_t)ctx->Pc, pc,
         rec->NumberParameters >= 1 ? (unsigned long long)rec->ExceptionInformation[0] : ~0ULL,
         rec->NumberParameters >= 2 ? (void*)rec->ExceptionInformation[1] : NULL);
     printf_log(LOG_NONE, "WOWBox64 guest regs: eax=%08x ecx=%08x edx=%08x ebx=%08x esp=%08x ebp=%08x esi=%08x edi=%08x\n",
