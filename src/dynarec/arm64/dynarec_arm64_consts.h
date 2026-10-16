@@ -92,6 +92,9 @@ typedef enum arm64_consts_s {
     const_sse42_compare_string_implicit_len,
     const_x64test_step,
     const_printtrace,
+#ifdef WOWBOX64_RESOURCE_DIAGNOSTIC
+    const_WowResourceTrace,
+#endif
     const_epilog,
     const_jmptbl32,
     const_jmptbl48,
