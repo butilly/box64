@@ -305,6 +305,8 @@ NTSTATUS WINAPI BTCpuProcessInit(void)
 
     InitX64Trace(&box64_context);
 
+    printf_log(LOG_NONE, "WOWBox64 resource diagnostic v2: enabled; fingerprinted lookup sites only\n");
+
     return STATUS_SUCCESS;
 }
 
@@ -320,35 +322,43 @@ static BOOL read_guest_diagnostic(uint32_t addr, void* data, SIZE_T size)
  * Never patch guest code or replace the return values being observed. */
 int WowResourceTraceSite(uintptr_t pc)
 {
+    unsigned slot;
     switch (pc) {
-    case 0x403527: /* cache candidate versus end */
-    case 0x403712: /* cached payload lookup returned */
-    case 0x403761: /* loose File::exists returned (AL, not EAX) */
-    case 0x403783: /* loose payload read returned */
-    case 0x40382f: /* BaseFile result returned to font loader */
-        break;
+    case 0x403527: slot = 0; break; /* cache candidate versus end */
+    case 0x403712: slot = 1; break; /* cached payload lookup returned */
+    case 0x403761: slot = 2; break; /* loose File::exists returned (AL, not EAX) */
+    case 0x403783: slot = 3; break; /* loose payload read returned */
+    case 0x40382f: slot = 4; break; /* BaseFile result returned to font loader */
     default:
         return 0;
     }
-    IMAGE_DOS_HEADER dos;
-    IMAGE_NT_HEADERS32 nt;
-    MEMORY_BASIC_INFORMATION info;
+    IMAGE_DOS_HEADER dos = {0};
+    IMAGE_NT_HEADERS32 nt = {0};
+    MEMORY_BASIC_INFORMATION info = {0};
     static const unsigned char lookup[] = {0xe8,0x4e,0xfd,0xff,0xff,0x8b,0xf8,0x85,0xff,0x74,0x2e};
     static const unsigned char exists[] = {0xff,0x15,0x50,0x0b,0x63,0x00,0x84,0xc0,0x75,0x07};
     unsigned char code[sizeof(lookup)], fallback[sizeof(exists)];
-    if (!NT_SUCCESS(NtQueryVirtualMemory(NtCurrentProcess(), (void*)pc, MemoryBasicInformation,
-                                         &info, sizeof(info), NULL)) ||
-        info.Type != MEM_IMAGE || info.AllocationBase != (void*)0x400000 ||
-        !read_guest_diagnostic(0x400000, &dos, sizeof(dos)) || dos.e_magic != IMAGE_DOS_SIGNATURE ||
-        dos.e_lfanew < 0 || dos.e_lfanew > 0x1000 ||
-        !read_guest_diagnostic(0x400000 + dos.e_lfanew, &nt, sizeof(nt)) ||
-        nt.Signature != IMAGE_NT_SIGNATURE || nt.FileHeader.Machine != IMAGE_FILE_MACHINE_I386 ||
-        nt.OptionalHeader.SizeOfImage != 0x3a1000 || nt.OptionalHeader.AddressOfEntryPoint != 0x2030f5 ||
-        nt.OptionalHeader.CheckSum != 0x2f5f47 ||
-        !read_guest_diagnostic(0x40370d, code, sizeof(code)) || memcmp(code, lookup, sizeof(code)) ||
-        !read_guest_diagnostic(0x40375b, fallback, sizeof(fallback)) || memcmp(fallback, exists, sizeof(fallback)))
-        return 0;
-    return 1;
+    unsigned checks = 0;
+    if (NT_SUCCESS(NtQueryVirtualMemory(NtCurrentProcess(), (void*)pc, MemoryBasicInformation,
+                                       &info, sizeof(info), NULL)) &&
+        info.Type == MEM_IMAGE && info.AllocationBase == (void*)0x400000) checks |= 1;
+    if (read_guest_diagnostic(0x400000, &dos, sizeof(dos)) && dos.e_magic == IMAGE_DOS_SIGNATURE &&
+        dos.e_lfanew >= 0 && dos.e_lfanew <= 0x1000 &&
+        read_guest_diagnostic(0x400000 + dos.e_lfanew, &nt, sizeof(nt)) &&
+        nt.Signature == IMAGE_NT_SIGNATURE && nt.FileHeader.Machine == IMAGE_FILE_MACHINE_I386)
+        checks |= 2;
+    if ((checks & 2) && nt.OptionalHeader.SizeOfImage == 0x3a1000 &&
+        nt.OptionalHeader.AddressOfEntryPoint == 0x2030f5 && nt.OptionalHeader.CheckSum == 0x2f5f47)
+        checks |= 4;
+    if (read_guest_diagnostic(0x40370d, code, sizeof(code)) && !memcmp(code, lookup, sizeof(code))) checks |= 8;
+    if (read_guest_diagnostic(0x40375b, fallback, sizeof(fallback)) && !memcmp(fallback, exists, sizeof(fallback))) checks |= 16;
+    static LONG reported[5];
+    if (InterlockedCompareExchange(&reported[slot], 1, 0) == 0)
+        printf_log(LOG_NONE, "WOWBox64 resource hook: pc=%08x checks=%02x expected=1f type=%08x base=%p image=%08x entry=%08x checksum=%08x\n",
+            (unsigned)pc, checks, (unsigned)info.Type, info.AllocationBase,
+            (unsigned)nt.OptionalHeader.SizeOfImage, (unsigned)nt.OptionalHeader.AddressOfEntryPoint,
+            (unsigned)nt.OptionalHeader.CheckSum);
+    return checks == 31;
 }
 
 static int read_resource_name(uint32_t addr, char* name, size_t size)
@@ -366,10 +376,11 @@ static int read_resource_name(uint32_t addr, char* name, size_t size)
 void WowResourceTrace(x64emu_t* emu, uintptr_t pc, int unused)
 {
     static LONG captures[5];
+    static LONG probes[5];
     unsigned slot;
     uint32_t sp = emu->regs[_SP].dword[0], nameptr = emu->regs[_BX].dword[0];
     uint32_t result = emu->regs[_AX].dword[0], detail = 0;
-    char name[160], converted[160];
+    char name[160] = {0}, converted[160];
     const char* stage;
     switch (pc) {
     case 0x403527:
@@ -382,7 +393,11 @@ void WowResourceTrace(x64emu_t* emu, uintptr_t pc, int unused)
     case 0x40382f: slot = 4; stage = "file-return"; break;
     default: return;
     }
-    if (!read_resource_name(nameptr, name, sizeof(name))) return;
+    int name_readable = read_resource_name(nameptr, name, sizeof(name));
+    if (InterlockedIncrement(&probes[slot]) <= 4)
+        printf_log(LOG_NONE, "WOWBox64 resource probe: stage=%s pc=%08x nameptr=%08x readable=%d prefix=%.6s result=%08x\n",
+            stage, (unsigned)pc, nameptr, name_readable, name_readable ? name : "", result);
+    if (!name_readable) return;
     const char* prefix = "fonts/";
     for (unsigned i = 0; i < 6; ++i) {
         unsigned char c = name[i];
@@ -416,8 +431,9 @@ static void log_guest_location(const char* label, unsigned index, uint32_t pc)
     MEMORY_BASIC_INFORMATION info;
     if (NT_SUCCESS(NtQueryVirtualMemory(NtCurrentProcess(), ULongToPtr(pc), MemoryBasicInformation,
                                       &info, sizeof(info), NULL)) && info.Type == MEM_IMAGE) {
-        printf_log(LOG_NONE, "WOWBox64 guest %s[%u]: pc=%08x image_base=%p rva=%08x\n",
-            label, index, pc, info.AllocationBase, pc - (uint32_t)(uintptr_t)info.AllocationBase);
+        printf_log(LOG_NONE, "WOWBox64 guest %s[%u]: pc=%08x image_base=%p rva=%08x executable=%d\n",
+            label, index, pc, info.AllocationBase, pc - (uint32_t)(uintptr_t)info.AllocationBase,
+            !!(info.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)));
     } else {
         printf_log(LOG_NONE, "WOWBox64 guest %s[%u]: pc=%08x (not an image)\n", label, index, pc);
     }
