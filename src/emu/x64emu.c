@@ -1686,6 +1686,10 @@ uintptr_t GetSegmentBaseEmu(x64emu_t* emu, int seg)
 #ifdef BOX64EC
     if (seg == _GS)
         return emu->win64_teb;
+#endif
+#ifdef _WIN32
+    /* Wine supplies the thread's FS base at emulator entry. Its segment
+     * lookup stub must not replace that base with NULL in WOW64 fallback. */
     if (seg == _FS)
         return emu->segs_offs[_FS];
 #endif
