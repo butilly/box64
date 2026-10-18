@@ -4,6 +4,7 @@
  */
 #include <stddef.h>
 #include <stdio.h>
+#include <strings.h>
 #include <windows.h>
 #include <ntstatus.h>
 #include <winternl.h>
@@ -37,7 +38,30 @@ uint8_t box64_rdtsc_shift = 0;
 int box64_is32bits = 0;
 int box64_unittest_mode = 0;
 int box64_wine = 0; // this is for the emulated x86 Wine.
+int box64_hang_trace = 0;
 sysinfo_t box64_sysinfo = {0};
+
+void Box64HangTrace(x64emu_t* emu, uintptr_t ip)
+{
+    LARGE_INTEGER now;
+    MEMORY_BASIC_INFORMATION info;
+    uintptr_t base = 0;
+
+    /* Bound output and avoid a clock query at every translated instruction. */
+    if (emu->hang_trace_samples >= 32 || (++emu->hang_trace_hits & 0xffff))
+        return;
+    if (NtQuerySystemTime(&now) || (uint64_t)now.QuadPart < emu->hang_trace_next_time)
+        return;
+    emu->hang_trace_next_time = (uint64_t)now.QuadPart + 20000000;
+    ++emu->hang_trace_samples;
+    if (!NtQueryVirtualMemory(NtCurrentProcess(), (void*)ip, MemoryBasicInformation,
+                              &info, sizeof(info), NULL))
+        base = (uintptr_t)info.AllocationBase;
+    printf_log(LOG_NONE, "WOW64-HANG tid=%x sample=%u ip=%p image=%p offset=%zx "
+               "eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x esp=%08x ebp=%08x\n",
+               GetTID(), emu->hang_trace_samples, (void*)ip, (void*)base, ip - base,
+               R_EAX, R_EBX, R_ECX, R_EDX, R_ESI, R_EDI, R_ESP, R_EBP);
+}
 
 static uint32_t x86emu_parity_tab[8] = {
     0x96696996,
@@ -272,6 +296,15 @@ NTSTATUS WINAPI BTCpuProcessInit(void)
         if (shortname) {
             shortname++;
             ApplyEnvFileEntry(shortname);
+            if (!strcasecmp(shortname, "hl.exe")) {
+                box64_hang_trace = 1;
+                /* Do not inherit the failed comparison test from an earlier run. */
+                box64env.dynarec_test = 0;
+                SET_BOX64ENV(dynarec, 1);
+                SET_BOX64ENV(dynarec_wait, 1);
+                SET_BOX64ENV(dynacache, 0);
+                printf_log(LOG_NONE, "WOW64-HANG enabled: JIT instruction samples, no interpreter comparison, max 32 per thread\n");
+            }
         }
     }
 

@@ -130,6 +130,9 @@ typedef struct x64emu_s {
 
     #ifdef _WIN32
     uint64_t    win64_teb;
+    uint64_t    hang_trace_hits;
+    uint64_t    hang_trace_next_time;
+    uint32_t    hang_trace_samples;
     #endif
     // local selector handling
     base_segment_t  segldt[16];

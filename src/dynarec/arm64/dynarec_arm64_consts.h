@@ -92,6 +92,7 @@ typedef enum arm64_consts_s {
     const_sse42_compare_string_implicit_len,
     const_x64test_step,
     const_printtrace,
+    const_Box64HangTrace,
     const_epilog,
     const_jmptbl32,
     const_jmptbl48,
