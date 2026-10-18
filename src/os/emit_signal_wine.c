@@ -24,6 +24,7 @@
 
 #ifndef BOX64EC
 NTSYSAPI NTSTATUS WINAPI NtReadVirtualMemory(HANDLE, const void*, void*, SIZE_T, SIZE_T*);
+void Box64Wow64RaiseTrap(x64emu_t* emu, int code);
 
 /* Record the guest site before RtlRaiseException enters host stack unwinding.
  * A generated-code frame may not be unwindable, so logging in the later
@@ -111,6 +112,10 @@ void EmitSignal(x64emu_t* emu, int sig, void* addr, int code)
 #else
     EXCEPTION_RECORD rec;
 
+    if (sig == X64_SIGTRAP && code == 3) {
+        Box64Wow64RaiseTrap(emu, code);
+        return;
+    }
     switch (sig) {
         case X64_SIGILL:
             printf_log(LOG_DEBUG, "SIGILL at %p with code %d\n", addr, code);
@@ -186,13 +191,8 @@ void EmuInt3(void* opaque, void* addr)
     rec.NumberParameters = 1;
     Box64EC_RaiseGuestException(&rec);
 #else
-    EXCEPTION_RECORD rec;
-
-    rec.ExceptionCode = STATUS_BREAKPOINT;
-    rec.ExceptionFlags = 0;
-    rec.ExceptionRecord = NULL;
-    rec.ExceptionAddress = addr;
-    rec.NumberParameters = 0;
-    RtlRaiseException(&rec);
+    x64emu_t* emu = opaque;
+    R_RIP = *(uintptr_t*)addr;
+    Box64Wow64RaiseTrap(emu, 3);
 #endif
 }

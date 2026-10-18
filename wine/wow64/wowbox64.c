@@ -20,6 +20,7 @@
 #include "box64context.h"
 #include "box64cpu.h"
 #include "box64cpu_util.h"
+#include "x64emu.h"
 #include "build_info.h"
 #include "rbtree.h"
 #include "wine/compiler.h"
@@ -486,6 +487,81 @@ void EmitInterruption(x64emu_t* emu, int num, void* addr)
 {
     CONTEXT* entry_context = NtCurrentTeb()->TlsSlots[WOW64_TLS_ENTRY_CONTEXT];
     SEHFrameTrampoline2Args(emu, num, (void*)EmitInterruptionImpl, entry_context->Sp, entry_context->Pc);
+    NtCurrentTeb()->TlsSlots[WOW64_TLS_ENTRY_CONTEXT] = entry_context;
+}
+
+NTSTATUS WINAPI Wow64RaiseException(int code, EXCEPTION_RECORD* rec);
+
+static void raise_wow64_trap(x64emu_t* emu, int code)
+{
+    WOW64_CPURESERVED* cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPURESERVED];
+    WOW64_CONTEXT* ctx = (WOW64_CONTEXT*)(cpu + 1);
+    EXCEPTION_RECORD rec = {0};
+    static LONG count;
+    LONG sequence = InterlockedIncrement(&count);
+
+    /* Wine needs the current guest state, not the last syscall's context.
+     * Keep EIP after INT3: Wow64RaiseException adjusts the exception address
+     * and the guest dispatcher adjusts the saved EIP exactly once. */
+    if (emu->df)
+        UpdateFlags(emu);
+    ctx->Eax = R_EAX;
+    ctx->Ebx = R_EBX;
+    ctx->Ecx = R_ECX;
+    ctx->Edx = R_EDX;
+    ctx->Esi = R_ESI;
+    ctx->Edi = R_EDI;
+    ctx->Ebp = R_EBP;
+    ctx->Esp = R_ESP;
+    ctx->Eip = R_RIP;
+    ctx->EFlags = emu->eflags.x64;
+    ctx->SegCs = R_CS;
+    ctx->SegDs = R_DS;
+    ctx->SegEs = R_ES;
+    ctx->SegFs = R_FS;
+    ctx->SegGs = R_GS;
+    ctx->SegSs = R_SS;
+    box_to_fpu(ctx, emu);
+    cpu->Flags = 0;
+
+    if (sequence > 0 && sequence <= 8)
+        printf_log(LOG_NONE, "WOW64 guest trap #%ld code=%d eip=%08lx esp=%08lx\n",
+            sequence, code, ctx->Eip, ctx->Esp);
+    Wow64RaiseException(code, &rec);
+    if (sequence > 0 && sequence <= 8)
+        printf_log(LOG_NONE, "WOW64 guest trap #%ld delivered status=%08lx address=%p resume=%08lx\n",
+            sequence, (unsigned long)rec.ExceptionCode, rec.ExceptionAddress, ctx->Eip);
+
+    /* Resume the guest exception dispatcher (or a debugger's continuation),
+     * including volatile registers and flags. Do not resume past the trap. */
+    R_EAX = ctx->Eax;
+    R_EBX = ctx->Ebx;
+    R_ECX = ctx->Ecx;
+    R_EDX = ctx->Edx;
+    R_ESI = ctx->Esi;
+    R_EDI = ctx->Edi;
+    R_EBP = ctx->Ebp;
+    R_ESP = ctx->Esp;
+    R_RIP = ctx->Eip;
+    R_CS = ctx->SegCs & 0xffff;
+    R_DS = ctx->SegDs & 0xffff;
+    R_ES = ctx->SegEs & 0xffff;
+    R_FS = ctx->SegFs & 0xffff;
+    R_GS = ctx->SegGs & 0xffff;
+    R_SS = ctx->SegSs & 0xffff;
+    emu->segs_offs[_FS] = calculate_fs();
+    emu->eflags.x64 = ctx->EFlags;
+    emu->df = d_none;
+    fpu_to_box(ctx, emu);
+    cpu->Flags &= ~WOW64_CPURESERVED_FLAG_RESET_STATE;
+}
+
+void Box64Wow64RaiseTrap(x64emu_t* emu, int code)
+{
+    CONTEXT* entry_context = NtCurrentTeb()->TlsSlots[WOW64_TLS_ENTRY_CONTEXT];
+    /* The same unwind bridge as syscalls keeps the JIT frame out of Wine's
+     * first-chance backtrace and exception-handler search. */
+    SEHFrameTrampoline2Args(emu, code, (void*)raise_wow64_trap, entry_context->Sp, entry_context->Pc);
     NtCurrentTeb()->TlsSlots[WOW64_TLS_ENTRY_CONTEXT] = entry_context;
 }
 
