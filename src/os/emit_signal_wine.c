@@ -29,7 +29,7 @@ void Box64Wow64RaiseTrap(x64emu_t* emu, int code);
 /* Record the guest site before RtlRaiseException enters host stack unwinding.
  * A generated-code frame may not be unwindable, so logging in the later
  * WOW64 reset callback is too late. Never dereference the guest PC here. */
-static void log_wow64_sigill(x64emu_t* emu, void* addr, int code)
+static void log_wow64_signal(x64emu_t* emu, int sig, void* addr, int code)
 {
     static LONG count;
     MEMORY_BASIC_INFORMATION memory = {0};
@@ -44,9 +44,10 @@ static void log_wow64_sigill(x64emu_t* emu, void* addr, int code)
     if (sequence < 1 || sequence > 8)
         return;
 
-    query_status = NtQueryVirtualMemory(NtCurrentProcess(), addr,
+    void* pc = (void*)(uintptr_t)R_RIP;
+    query_status = NtQueryVirtualMemory(NtCurrentProcess(), pc,
         MemoryBasicInformation, &memory, sizeof(memory), NULL);
-    read_status = NtReadVirtualMemory(NtCurrentProcess(), addr, bytes,
+    read_status = NtReadVirtualMemory(NtCurrentProcess(), pc, bytes,
         sizeof(bytes), &read);
     if (read > sizeof(bytes))
         read = sizeof(bytes);
@@ -57,13 +58,13 @@ static void log_wow64_sigill(x64emu_t* emu, void* addr, int code)
     }
     hex[3 * read] = 0;
 
-    printf_log(LOG_NONE, "WOW64 guest SIGILL #%ld tid=%d eip=%p addr=%p code=%d "
+    printf_log(LOG_NONE, "WOW64 guest signal #%ld sig=%d tid=%d eip=%p addr=%p code=%d "
         "allocation=%p offset=0x%llx type=0x%lx protect=0x%lx query=0x%lx\n",
-        sequence, GetTID(), (void*)(uintptr_t)R_RIP, addr, code,
+        sequence, sig, GetTID(), pc, addr, code,
         memory.AllocationBase,
-        (unsigned long long)((uintptr_t)addr - (uintptr_t)memory.AllocationBase),
+        (unsigned long long)((uintptr_t)pc - (uintptr_t)memory.AllocationBase),
         memory.Type, memory.Protect, (unsigned long)query_status);
-    printf_log(LOG_NONE, "WOW64 guest SIGILL #%ld bytes[%zu]=%sread=0x%lx\n",
+    printf_log(LOG_NONE, "WOW64 guest signal #%ld bytes[%zu]=%sread=0x%lx\n",
         sequence, read, hex, (unsigned long)read_status);
 }
 #endif
@@ -116,10 +117,10 @@ void EmitSignal(x64emu_t* emu, int sig, void* addr, int code)
         Box64Wow64RaiseTrap(emu, code);
         return;
     }
+    log_wow64_signal(emu, sig, addr, code);
     switch (sig) {
         case X64_SIGILL:
             printf_log(LOG_DEBUG, "SIGILL at %p with code %d\n", addr, code);
-            log_wow64_sigill(emu, addr, code);
             rec.ExceptionCode = STATUS_ILLEGAL_INSTRUCTION;
             break;
         case X64_SIGSEGV:

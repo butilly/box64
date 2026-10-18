@@ -321,6 +321,21 @@ NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
     x64emu_t* emu = NtCurrentTeb()->TlsSlots[WOW64_TLS_EMU];
     EXCEPTION_RECORD* rec = ptrs->ExceptionRecord;
     CONTEXT* ctx = ptrs->ContextRecord;
+    static LONG fault_count;
+    LONG sequence = InterlockedIncrement(&fault_count);
+
+    /* Capture before Wine tries to unwind a generated frame. Host PCs are
+     * pointer-sized even though the emulated instruction pointer is 32-bit. */
+    if (sequence > 0 && sequence <= 8)
+        printf_log(LOG_NONE, "WOW64 native fault #%ld status=%08lx pc=%p sp=%p "
+            "address=%p params=%lu access=%llu target=%p guest=%p fs=%p\n",
+            sequence, (unsigned long)rec->ExceptionCode,
+            (void*)(uintptr_t)ctx->Pc, (void*)(uintptr_t)ctx->Sp,
+            rec->ExceptionAddress, rec->NumberParameters,
+            (unsigned long long)(rec->NumberParameters ? rec->ExceptionInformation[0] : 0),
+            rec->NumberParameters > 1 ? (void*)rec->ExceptionInformation[1] : NULL,
+            emu ? (void*)(uintptr_t)R_RIP : NULL,
+            emu ? (void*)emu->segs_offs[_FS] : NULL);
 
     if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
         dynablock_t* db = NULL;
@@ -336,7 +351,7 @@ NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
         }
     }
 
-    if (!box64_is_addr_in_jit(ULongToPtr(ctx->Pc)))
+    if (!box64_is_addr_in_jit((void*)(uintptr_t)ctx->Pc))
         return STATUS_SUCCESS;
 
     /* Replace the host context with one captured before JIT entry so host code can unwind */
