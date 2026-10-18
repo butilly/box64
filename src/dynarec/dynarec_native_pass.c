@@ -24,6 +24,10 @@
 #include "dynarec_arch.h"
 #include "dynarec_helper.h"
 
+#if defined(_WIN32) && defined(ARM64) && !defined(BOX64EC)
+extern int box64_hang_trace;
+#endif
+
 #ifndef STEP
 #error No STEP defined
 #endif
@@ -231,6 +235,14 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
             GOTEST(x1, x2);
         }
         if(dyn->insts[ninst].pred_sz>1) {SMEND();}
+        #if defined(_WIN32) && defined(ARM64) && !defined(BOX64EC)
+        if (box64_hang_trace) {
+            /* Follow the existing instruction-trace ABI in every JIT pass. */
+            fpu_reflectcache(dyn, ninst, x1, x2, x3);
+            GO_TRACE(Box64HangTrace, 0, x5);
+            fpu_unreflectcache(dyn, ninst, x1, x2, x3);
+        }
+        #endif
         #if STEP > 1
         if (dyn->insts[ninst].lock) {
             WILLWRITELOCK(dyn->insts[ninst].lock);

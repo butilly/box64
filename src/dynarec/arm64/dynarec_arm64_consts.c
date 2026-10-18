@@ -25,6 +25,10 @@
 #include "dynarec/dynarec_next.h"
 #include "random.h"
 
+#if defined(_WIN32) && !defined(BOX64EC)
+extern void Box64HangTrace(x64emu_t* emu, uintptr_t ip);
+#endif
+
 static const int8_t mask_shift8[] = { -7, -6, -5, -4, -3, -2, -1, 0 };
 static const int8_t mask_string8[] = { 7, 6, 5, 4, 3, 2, 1, 0 };
 static const int8_t mask_string16[] = { 15, 14, 13, 12, 11, 10, 9, 8 };
@@ -129,6 +133,9 @@ uintptr_t getConst(arm64_consts_t which)
         case const_sse42_compare_string_implicit_len: return (uintptr_t)sse42_compare_string_implicit_len;
         case const_x64test_step: return (uintptr_t)x64test_step;
         case const_printtrace: return (uintptr_t)PrintTrace;
+#if defined(_WIN32) && !defined(BOX64EC)
+        case const_Box64HangTrace: return (uintptr_t)Box64HangTrace;
+#endif
         case const_epilog: return (uintptr_t)native_epilog;
         case const_jmptbl32: return getJumpTable32();
         case const_jmptbl48: return getJumpTable48();
