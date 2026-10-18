@@ -4,6 +4,7 @@
  */
 #include <stddef.h>
 #include <stdio.h>
+#include <strings.h>
 #include <windows.h>
 #include <ntstatus.h>
 #include <winternl.h>
@@ -37,7 +38,142 @@ uint8_t box64_rdtsc_shift = 0;
 int box64_is32bits = 0;
 int box64_unittest_mode = 0;
 int box64_wine = 0; // this is for the emulated x86 Wine.
+int box64_hang_trace = 0;
+static int hang_watch_enabled;
+static LONG hang_watch_started;
 sysinfo_t box64_sysinfo = {0};
+
+NTSYSAPI NTSTATUS NTAPI NtDuplicateObject(HANDLE, HANDLE, HANDLE, PHANDLE, ACCESS_MASK, ULONG, ULONG);
+NTSYSAPI NTSTATUS NTAPI NtCreateThreadEx(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, HANDLE,
+                                       PVOID, PVOID, ULONG, SIZE_T, SIZE_T, SIZE_T, PVOID);
+NTSYSAPI NTSTATUS NTAPI NtSuspendThread(HANDLE, PULONG);
+NTSYSAPI NTSTATUS NTAPI NtResumeThread(HANDLE, PULONG);
+NTSYSAPI NTSTATUS NTAPI NtGetContextThread(HANDLE, PCONTEXT);
+NTSYSAPI NTSTATUS NTAPI NtDelayExecution(BOOLEAN, PLARGE_INTEGER);
+
+static struct {
+    HANDLE thread;
+    x64emu_t* emu;
+    unsigned int tid;
+} hang_watch;
+
+static uintptr_t hang_image_base(uintptr_t pc)
+{
+    MEMORY_BASIC_INFORMATION info;
+    if (!NtQueryVirtualMemory(NtCurrentProcess(), (void*)pc, MemoryBasicInformation,
+                              &info, sizeof(info), NULL))
+        return (uintptr_t)info.AllocationBase;
+    return 0;
+}
+
+static void hang_log_mapping(const char* label, uintptr_t pc)
+{
+    union {
+        UNICODE_STRING name;
+        char bytes[1024];
+    } mapped;
+    char name[512];
+    DWORD length = 0;
+    uintptr_t base = hang_image_base(pc);
+    /* MemoryMappedFilename does not need the loader's module-list lock. */
+    if (!NtQueryVirtualMemory(NtCurrentProcess(), (void*)pc, (MEMORY_INFORMATION_CLASS)2,
+                              &mapped, sizeof(mapped), NULL))
+        RtlUnicodeToMultiByteN(name, sizeof(name) - 1, &length,
+                              mapped.name.Buffer, mapped.name.Length);
+    name[length] = 0;
+    printf_log(LOG_NONE, "WOW64-WATCH %s=%p image=%p offset=%zx mapped=%s\n",
+               label, (void*)pc, (void*)base, pc - base, length ? name : "(anonymous)");
+}
+
+static NTSTATUS WINAPI hang_watch_main(void* unused)
+{
+    LARGE_INTEGER delay;
+    (void)unused;
+    printf_log(LOG_NONE, "WOW64-WATCH started tid=%x; 32 native samples at two-second intervals\n", hang_watch.tid);
+    delay.QuadPart = -20000000;
+    for (unsigned int sample = 1; sample <= 32; ++sample) {
+        CONTEXT ctx = {0};
+        uintptr_t guest_ip = 0, base, guest_base;
+        NTSTATUS status, resume;
+
+        if (NtDelayExecution(FALSE, &delay)) break;
+        ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        status = NtSuspendThread(hang_watch.thread, NULL);
+        if (status) {
+            printf_log(LOG_NONE, "WOW64-WATCH suspend status=%08x\n", (unsigned int)status);
+            break;
+        }
+        /* Do not allocate, log, or acquire JIT/loader locks while it is stopped. */
+        status = NtGetContextThread(hang_watch.thread, &ctx);
+        guest_ip = hang_watch.emu->ip.q[0];
+        resume = NtResumeThread(hang_watch.thread, NULL);
+        if (resume) resume = NtResumeThread(hang_watch.thread, NULL);
+        if (status || resume) {
+            printf_log(LOG_NONE, "WOW64-WATCH context status=%08x resume=%08x\n",
+                       (unsigned int)status, (unsigned int)resume);
+            break;
+        }
+        base = hang_image_base(ctx.Pc);
+        guest_base = hang_image_base(guest_ip);
+        printf_log(LOG_NONE, "WOW64-WATCH tid=%x sample=%u pc=%p image=%p offset=%zx "
+                   "lr=%p sp=%p saved_guest_ip=%p guest_image=%p guest_offset=%zx "
+                   "x0=%p x10=%p x11=%p x12=%p x13=%p x14=%p x15=%p x16=%p x17=%p x27=%p\n",
+                   hang_watch.tid, sample, (void*)(uintptr_t)ctx.Pc, (void*)base,
+                   (uintptr_t)ctx.Pc - base, (void*)(uintptr_t)ctx.Lr, (void*)(uintptr_t)ctx.Sp,
+                   (void*)guest_ip, (void*)guest_base, guest_ip - guest_base,
+                   (void*)(uintptr_t)ctx.X0, (void*)(uintptr_t)ctx.X10, (void*)(uintptr_t)ctx.X11,
+                   (void*)(uintptr_t)ctx.X12, (void*)(uintptr_t)ctx.X13, (void*)(uintptr_t)ctx.X14,
+                   (void*)(uintptr_t)ctx.X15, (void*)(uintptr_t)ctx.X16, (void*)(uintptr_t)ctx.X17,
+                   (void*)(uintptr_t)ctx.X27);
+        hang_log_mapping("pc", ctx.Pc);
+        hang_log_mapping("lr", ctx.Lr);
+        hang_log_mapping("raw_x27", ctx.X27);
+    }
+    NtClose(hang_watch.thread);
+    return STATUS_SUCCESS;
+}
+
+static void start_hang_watch(x64emu_t* emu)
+{
+    HANDLE watcher;
+    NTSTATUS status;
+    if (!hang_watch_enabled || InterlockedCompareExchange(&hang_watch_started, 1, 0)) return;
+    hang_watch.emu = emu;
+    hang_watch.tid = GetTID();
+    status = NtDuplicateObject(NtCurrentProcess(), (HANDLE)(LONG_PTR)-2, NtCurrentProcess(),
+                               &hang_watch.thread, THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, 0, 0);
+    if (!status) {
+        /* Skip DLL thread notifications: the target can hang holding the loader lock. */
+        status = NtCreateThreadEx(&watcher, THREAD_ALL_ACCESS, NULL, NtCurrentProcess(),
+                                  (void*)hang_watch_main, NULL, 2 /* SKIP_THREAD_ATTACH */,
+                                  0, 0, 0, NULL);
+        if (!status) NtClose(watcher);
+        else NtClose(hang_watch.thread);
+    }
+    printf_log(LOG_NONE, "WOW64-WATCH create tid=%x status=%08x\n", hang_watch.tid, (unsigned int)status);
+}
+
+void Box64HangTrace(x64emu_t* emu, uintptr_t ip)
+{
+    LARGE_INTEGER now;
+    MEMORY_BASIC_INFORMATION info;
+    uintptr_t base = 0;
+
+    /* Bound output and avoid a clock query at every translated instruction. */
+    if (emu->hang_trace_samples >= 32 || (++emu->hang_trace_hits & 0xffff))
+        return;
+    if (NtQuerySystemTime(&now) || (uint64_t)now.QuadPart < emu->hang_trace_next_time)
+        return;
+    emu->hang_trace_next_time = (uint64_t)now.QuadPart + 20000000;
+    ++emu->hang_trace_samples;
+    if (!NtQueryVirtualMemory(NtCurrentProcess(), (void*)ip, MemoryBasicInformation,
+                              &info, sizeof(info), NULL))
+        base = (uintptr_t)info.AllocationBase;
+    printf_log(LOG_NONE, "WOW64-HANG tid=%x sample=%u ip=%p image=%p offset=%zx "
+               "eax=%08x ebx=%08x ecx=%08x edx=%08x esi=%08x edi=%08x esp=%08x ebp=%08x\n",
+               GetTID(), emu->hang_trace_samples, (void*)ip, (void*)base, ip - base,
+               R_EAX, R_EBX, R_ECX, R_EDX, R_ESI, R_EDI, R_ESP, R_EBP);
+}
 
 static uint32_t x86emu_parity_tab[8] = {
     0x96696996,
@@ -272,6 +408,16 @@ NTSTATUS WINAPI BTCpuProcessInit(void)
         if (shortname) {
             shortname++;
             ApplyEnvFileEntry(shortname);
+            if (!strcasecmp(shortname, "hl.exe")) {
+                /* Native sampling does not depend on executing a JIT trace call. */
+                hang_watch_enabled = 1;
+                /* Do not inherit the failed comparison test from an earlier run. */
+                box64env.dynarec_test = 0;
+                SET_BOX64ENV(dynarec, 1);
+                SET_BOX64ENV(dynarec_wait, 1);
+                SET_BOX64ENV(dynacache, 0);
+                printf_log(LOG_NONE, "WOW64-WATCH enabled: native main-thread sampling, no JIT trace or interpreter comparison\n");
+            }
         }
     }
 
@@ -380,6 +526,8 @@ void WINAPI BTCpuSimulate(void)
     emu->win64_teb = (uint64_t)NtCurrentTeb();
 
     fpu_to_box(ctx, emu);
+
+    start_hang_watch(emu);
 
     if (box64env.dynarec)
         DynaRun(emu);
