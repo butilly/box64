@@ -1686,6 +1686,10 @@ uintptr_t GetSegmentBaseEmu(x64emu_t* emu, int seg)
 #ifdef BOX64EC
     if (seg == _GS)
         return emu->win64_teb;
+#endif
+#ifdef _WIN32
+    /* Wine supplies the per-thread TEB32 base; the Linux descriptor lookup
+     * is a stub in the Windows frontend and would replace it with NULL. */
     if (seg == _FS)
         return emu->segs_offs[_FS];
 #endif

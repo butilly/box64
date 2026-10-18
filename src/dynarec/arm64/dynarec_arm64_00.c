@@ -2977,7 +2977,11 @@ uintptr_t dynarec64_00(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int nin
             *ok = 0;
             break;
         case 0xCC:
+            #if defined(_WIN32) && !defined(BOX64EC)
+            READFLAGS(X_PEND);
+            #else
             SETFLAGS(X_ALL, SF_SET_NODF);    // Hack, set all flags (to an unknown state...)
+            #endif
             NOTEST(x1);
             if (IsBridgeSignature(PK(0), PK(1))) {
                 addr+=2;
@@ -3029,12 +3033,19 @@ uintptr_t dynarec64_00(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int nin
             } else {
                 INST_NAME("INT 3");
                 if(!BOX64ENV(ignoreint3)) {
+                    #if defined(_WIN32) && !defined(BOX64EC)
+                    fpu_purgecache(dyn, ninst, 0, x1, x2, x3, 0);
+                    #endif
                     CHECK_DFNONE(0);
                     GETIP(addr);  // update RIP
                     STORE_XEMU_CALL(xRIP);
                     CALL_S(const_native_int3, -1);
                     LOAD_XEMU_CALL(xRIP);
+                    #if defined(_WIN32) && !defined(BOX64EC)
+                    jump_to_epilog(dyn, 0, xRIP, ninst);
+                    #else
                     jump_to_epilog(dyn, addr, 0, ninst);
+                    #endif
                     *need_epilog = 0;
                     *ok = 0;
                 }
