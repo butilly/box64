@@ -335,7 +335,8 @@ NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
         }
     }
 
-    if (!box64_is_addr_in_jit(ULongToPtr(ctx->Pc)))
+    /* Pc is a host address; generated ARM64 code may be above 4 GiB. */
+    if (!box64_is_addr_in_jit((void*)(ULONG_PTR)ctx->Pc))
         return STATUS_SUCCESS;
 
     /* Replace the host context with one captured before JIT entry so host code can unwind */
