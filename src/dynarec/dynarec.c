@@ -16,6 +16,8 @@
 #include "x64trace.h"
 #if defined(_WIN32) && !defined(BOX64EC)
 #include <winternl.h>
+#include "wine/compiler.h"
+NTSYSAPI NTSTATUS WINAPI NtReadVirtualMemory(HANDLE, const void*, void*, SIZE_T, SIZE_T*);
 #endif
 #include "threads.h"
 #include "alternate.h"
