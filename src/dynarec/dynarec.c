@@ -14,6 +14,9 @@
 #include "callback.h"
 #include "emu/x64run_private.h"
 #include "x64trace.h"
+#if defined(_WIN32) && !defined(BOX64EC)
+#include <winternl.h>
+#endif
 #include "threads.h"
 #include "alternate.h"
 #ifdef DYNAREC
@@ -34,6 +37,26 @@ void* LinkNext(x64emu_t* emu, uintptr_t addr, void* x2, uintptr_t* x3)
 {
     int is32bits = (R_CS == 0x23);
     if(!running32bits && is32bits) running32bits=1;
+#if defined(_WIN32) && !defined(BOX64EC)
+    /* HAVE_TRACE is not built into WOW64. Capture low-target callers before
+     * block lookup can fault and Wine starts unwinding the host stack. */
+    if (is32bits && addr < 0x10000) {
+        static LONG reports;
+        if (InterlockedIncrement(&reports) <= 8) {
+            uintptr_t host_call = (uintptr_t)x2 >= 4 ? (uintptr_t)x2 - 4 : 0;
+            dynablock_t* db = host_call ? FindDynablockFromNativeAddress((void*)host_call) : NULL;
+            uintptr_t caller = db ? getX64Address(db, host_call) : 0;
+            uint32_t stack[4] = {0};
+            SIZE_T bytes = 0;
+            NTSTATUS status = NtReadVirtualMemory(NtCurrentProcess(),
+                (void*)(uintptr_t)R_ESP, stack, sizeof(stack), &bytes);
+            printf_log(LOG_NONE, "WOW64 low-target: tid=%x target=%p host_call=%p caller_eip=%p mapped=%d esp=%08x\n",
+                GetTID(), (void*)addr, (void*)host_call, (void*)caller, db != NULL, R_ESP);
+            printf_log(LOG_NONE, "WOW64 low-target stack: status=%08lx bytes=%zu words=%08x %08x %08x %08x\n",
+                (unsigned long)status, bytes, stack[0], stack[1], stack[2], stack[3]);
+        }
+    }
+#endif
     #ifndef HAVE_ALTJUMP
     // inefficient way to handle alternate without ALTJUMP
     uintptr_t new_addr = (uintptr_t)getAlternate((void*)addr);
