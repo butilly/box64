@@ -102,13 +102,13 @@ uintptr_t dynarec64_F20F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
         case 0x2C:
             INST_NAME("CVTTSD2SI Gd, Ex");
             nextop = F8;
-            GETGD;
+            GETGDd;
             GETEXSD(v0, 0);
             if (!BOX64ENV(dynarec_fastround)) {
                 FSFLAGSI(0); // reset all bits
             }
             FCVTLDxw(gd, v0, RD_RTZ);
-            if (!rex.w) ZEROUP(gd);
+            if (NEED_ZEROUP(gd)) ZEROUP_RESULT(gd);
             if (!BOX64ENV(dynarec_fastround)) {
                 FRFLAGS(x5); // get back FPSR to check the IOC bit
                 ANDI(x5, x5, (1 << FR_NV) | (1 << FR_OF));
@@ -123,14 +123,14 @@ uintptr_t dynarec64_F20F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
         case 0x2D:
             INST_NAME("CVTSD2SI Gd, Ex");
             nextop = F8;
-            GETGD;
+            GETGDd;
             GETEXSD(v0, 0);
             if (!BOX64ENV(dynarec_fastround)) {
                 FSFLAGSI(0); // // reset all bits
             }
             u8 = sse_setround(dyn, ninst, x2, x3);
             FCVTLDxw(gd, v0, RD_DYN);
-            if (!rex.w) ZEROUP(gd);
+            if (NEED_ZEROUP(gd)) ZEROUP_RESULT(gd);
             x87_restoreround(dyn, ninst, u8);
             if (!BOX64ENV(dynarec_fastround)) {
                 FRFLAGS(x5); // get back FPSR to check the IOC bit
@@ -149,37 +149,63 @@ uintptr_t dynarec64_F20F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
 
                 case 0xF0: // CRC32 Gd, Eb
                     INST_NAME("CRC32 Gd, Eb");
+                    UP32_WRITE32(gd);
                     nextop = F8;
                     GETEB(x1, 0);
                     GETGD;
                     MV(x5, ed);
-                    ZEROUP(gd);
-                    XOR(gd, gd, x5);
-                    MOV32w(x2, 0x82f63b78);
-                    for (int i = 0; i < 8; i++) {
-                        SRLI((i & 1) ? gd : x4, (i & 1) ? x4 : gd, 1);
-                        ANDI(x6, (i & 1) ? x4 : gd, 1);
-                        BEQZ(x6, 4 + 4);
-                        XOR((i & 1) ? gd : x4, (i & 1) ? gd : x4, x2);
-                    }
-                    break;
-                case 0xF1: // CRC32 Gd, Ed
-                    INST_NAME("CRC32 Gd, Ed");
-                    nextop = F8;
-                    GETGD;
-                    GETED(0);
-                    MV(x5, ed);
-                    ZEROUP(gd);
-                    MOV32w(x2, 0x82f63b78);
-                    for (int j = 0; j < 4 * (rex.w + 1); ++j) {
-                        SRLI(x3, x5, 8 * j);
-                        ANDI(x3, x3, 0xFF);
-                        XOR(gd, gd, x3);
+                    if (cpuext.zbc) {
+                        ZEROUP(gd);
+                        XOR(x5, x5, gd);
+                        SLLI(x5, x5, 56);
+                        MOV64x(x2, 0x4869EC38DEA713F1ULL);
+                        CLMUL(x5, x5, x2);
+                        MOV64x(x2, 0x105EC76F1ULL);
+                        CLMULH(x5, x5, x2);
+                        SRLI(gd, gd, 8);
+                        XOR(gd, x5, gd);
+                    } else {
+                        if (NEED_ZEROUP32(gd)) ZEROUP_RESULT(gd);
+                        XOR(gd, gd, x5);
+                        MOV32w(x2, 0x82f63b78);
                         for (int i = 0; i < 8; i++) {
                             SRLI((i & 1) ? gd : x4, (i & 1) ? x4 : gd, 1);
                             ANDI(x6, (i & 1) ? x4 : gd, 1);
                             BEQZ(x6, 4 + 4);
                             XOR((i & 1) ? gd : x4, (i & 1) ? gd : x4, x2);
+                        }
+                    }
+                    break;
+                case 0xF1: // CRC32 Gd, Ed
+                    INST_NAME("CRC32 Gd, Ed");
+                    UP32_WRITE32(gd);
+                    nextop = F8;
+                    GETGD;
+                    GETED(0);
+                    MV(x5, ed);
+                    if (cpuext.zbc) {
+                        if (!rex.w) ZEROUP(x5);
+                        ZEROUP(gd);
+                        XOR(x5, x5, gd);
+                        if (!rex.w) SLLI(x5, x5, 32);
+                        MOV64x(x2, 0x4869EC38DEA713F1ULL);
+                        CLMUL(x5, x5, x2);
+                        MOV64x(x2, 0x105EC76F1ULL);
+                        CLMULH(x5, x5, x2);
+                        MV(gd, x5);
+                    } else {
+                        if (NEED_ZEROUP32(gd)) ZEROUP_RESULT(gd);
+                        MOV32w(x2, 0x82f63b78);
+                        for (int j = 0; j < 4 * (rex.w + 1); ++j) {
+                            SRLI(x3, x5, 8 * j);
+                            ANDI(x3, x3, 0xFF);
+                            XOR(gd, gd, x3);
+                            for (int i = 0; i < 8; i++) {
+                                SRLI((i & 1) ? gd : x4, (i & 1) ? x4 : gd, 1);
+                                ANDI(x6, (i & 1) ? x4 : gd, 1);
+                                BEQZ(x6, 4 + 4);
+                                XOR((i & 1) ? gd : x4, (i & 1) ? gd : x4, x2);
+                            }
                         }
                     }
                     break;
@@ -338,15 +364,9 @@ uintptr_t dynarec64_F20F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
             nextop = F8;
             GETGXSD(v0);
             GETEXSD(v1, 0);
-            FEQD(x2, v0, v0);
-            FEQD(x3, v1, v1);
-            AND(x2, x2, x3);
-            BEQ_MARK(x2, xZR);
-            FLED(x2, v1, v0);
-            BEQ_MARK2(x2, xZR);
-            MARK;
+            FLTD(x2, v0, v1);
+            BNEZ(x2, 8);
             FMVD(v0, v1);
-            MARK2;
             break;
         case 0x5E:
             INST_NAME("DIVSD Gx, Ex");
@@ -382,15 +402,9 @@ uintptr_t dynarec64_F20F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
             nextop = F8;
             GETGXSD(v0);
             GETEXSD(v1, 0);
-            FEQD(x2, v0, v0);
-            FEQD(x3, v1, v1);
-            AND(x2, x2, x3);
-            BEQ_MARK(x2, xZR);
-            FLED(x2, v0, v1);
-            BEQ_MARK2(x2, xZR);
-            MARK;
+            FLTD(x2, v1, v0);
+            BNEZ(x2, 8);
             FMVD(v0, v1);
-            MARK2;
             break;
         case 0x70: // TODO: Optimize this!
             INST_NAME("PSHUFLW Gx, Ex, Ib");

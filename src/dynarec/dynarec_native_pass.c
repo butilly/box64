@@ -113,7 +113,6 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
     dyn->forward_ninst = 0;
     dyn->ymm_zero = 0;
     dyn->is_file_mapped = IsAddrElfOrFileMapped(addr);
-    int dynarec_dirty = BOX64ENV(dynarec_dirty);
     #if STEP == 0
     memset(&dyn->insts[ninst], 0, sizeof(instruction_native_t));
     #endif
@@ -193,6 +192,8 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
         if(!ninst) {
             if (BOX64DRENV(dynarec_callret) >= 2)
                 doEnterBlock(dyn, 0, x1, x2, x3);
+            if (dyn->insts[0].preload_xmmymm)
+                doPreload(dyn, 0);
         }
         #endif
         fpu_propagate_stack(dyn, ninst);
@@ -251,7 +252,7 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
             MESSAGE(LOG_DUMP, "TEST STEP ----\n");
             extcache_native_t save;
             fpu_save_and_unwind(dyn, ninst, &save);
-            #ifdef LA64
+            #if defined(LA64) || defined(RV64)
             UP32_READALL();
             #endif
             fpu_reflectcache(dyn, ninst, x1, x2, x3);
@@ -268,7 +269,7 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
                 #if defined (SPILL_NF_REGISTERS)
                 if (BOX64ENV(dynarec_nativeflags)) SPILL_NF_REGISTERS;
                 #endif
-                #ifdef LA64
+                #if defined(LA64) || defined(RV64)
                 UP32_READALL();
                 #endif
                 fpu_reflectcache(dyn, ninst, x1, x2, x3);
@@ -334,7 +335,7 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
         else if (is_opcode_volatile && dyn->insts[ninst].will_read)
             DMB_ISHLD();
         #endif
-        #if defined(ARM64) || defined(LA64)
+        #if defined(ARM64) || defined(LA64) || defined(RV64)
         if(dyn->insts[ninst].x64.has_next && dyn->insts[ninst+1].preload_xmmymm) {
             doPreload(dyn, ninst+1);
         }
@@ -364,7 +365,7 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
         #define PROT_READ 1
         #endif
         #if STEP == 0
-        if(dynarec_dirty && ok && is_addr_autosmc(ip)) {
+        if(ok && is_addr_autosmc(ip)) {
             // this is the last opcode, because it will write in current block if not stopped
             ok = 0;
             need_epilog = 1;
@@ -387,6 +388,7 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
                     addr += dyn->insts[ninst].x64.size;
                     INST_EPILOG;
                 }
+                if ((ninst + 1) < dyn->size) dyn->insts[ninst + 1].x64.barrier |= BARRIER_FLOAT;
             }
             if((dyn->insts[ninst+1].x64.barrier&BARRIER_FULL)==BARRIER_FULL)
                 reset_n = -2;    // hack to say Barrier!

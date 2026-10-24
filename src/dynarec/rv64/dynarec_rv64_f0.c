@@ -267,6 +267,7 @@ uintptr_t dynarec64_F0(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int ni
                                 INST_NAME("LOCK CMPXCHG Ed, Gd");
                                 SETFLAGS(X_ALL, SF_SET_PENDING, NAT_FLAGS_NOFUSION);
                                 GETGD;
+                                MARKREGs(xRAX);
                                 addr = geted(dyn, addr, ninst, nextop, &wback, x2, x1, &fixedaddress, rex, LOCK_LOCK, 0, 0);
                                 UFLAG_IF { MVxw(x6, xRAX); }
                                 ANDI(x1, wback, (1 << (rex.w + 2)) - 1);
@@ -474,6 +475,8 @@ uintptr_t dynarec64_F0(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int ni
                                     INST_NAME("LOCK CMPXCHG8B Gq, Eq");
                                     SETFLAGS(X_ZF, SF_SUBSET, NAT_FLAGS_NOFUSION);
                                     SET_DFNONE();
+                                    MARKREGd(xRAX);
+                                    MARKREGd(xRDX);
                                     nextop = F8;
                                     addr = geted(dyn, addr, ninst, nextop, &wback, x1, x2, &fixedaddress, rex, LOCK_LOCK, 0, 0);
                                     ANDI(xFlags, xFlags, ~(1 << F_ZF));
@@ -515,6 +518,10 @@ uintptr_t dynarec64_F0(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int ni
                                     break;
                                 case 1:
                                     INST_NAME("LOCK CMPXCHG16B Gq, Eq");
+                                    MARKREGsd(xRAX);
+                                    MARKREGsd(xRDX);
+                                    MARKREGs(xRBX);
+                                    MARKREGs(xRCX);
                                     static int warned = 0;
                                     PASS3(if (!warned) dynarec_log(LOG_INFO, "Warning, LOCK CMPXCHG16B is not well supported on RISC-V and issues are expected.\n"));
                                     PASS3(warned = 1);
@@ -591,12 +598,12 @@ uintptr_t dynarec64_F0(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int ni
                 B_MARK3_nocond;
                 MARK;
                 SLLI(x3, x3, 3);
-                ADDI(x4, xZR, 0xff);
                 ANDI(x1, wback, ~3); // aligning address (into scratch, wback may be a live guest reg)
-                SLL(x4, x4, x3);     // x4 = byte mask
-                NOT(x5, x4);         // x5 = ~mask
                 SLL(x2, x2, x3);     // x2 = extented Gb
                 MARK2;
+                ADDI(x4, xZR, 0xff); // x4 = byte mask (recomputed on SC retry: x4/x5 are clobbered in the loop)
+                SLL(x4, x4, x3);
+                NOT(x5, x4);         // x5 = ~mask
                 LR_W(x6, x1, 1, 1); // x6 = Ed
                 AND(x7, x6, x4);    // x7 = extended Ed.b[dest]
                 AND(x6, x6, x5);    // x6 = clear Ed.b[dest]
@@ -818,12 +825,12 @@ uintptr_t dynarec64_F0(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int ni
                         SETFLAGS(X_ALL, SF_SET_PENDING, NAT_FLAGS_FUSION);
                         addr = geted(dyn, addr, ninst, nextop, &wback, x5, x1, &fixedaddress, rex, LOCK_LOCK, 0, 1);
                         u8 = F8;
-                        ANDI(x6, xFlags, 1 << F_CF); // carry-in, read once
-                        ADDI(x7, x6, u8);            // imm + carry
                         ANDI(x2, wback, 3);
                         SLLI(x2, x2, 3);             // offset in bits
                         ANDI(x3, wback, ~3);         // aligned addr
                         MARKLOCK;
+                        ANDI(x7, xFlags, 1 << F_CF); // carry-in (recomputed on SC retry: x7 is clobbered in the loop)
+                        ADDI(x7, x7, u8);            // imm + carry
                         LR_W(x4, x3, 1, 1);
                         SRL(x6, x4, x2);
                         ANDI(x6, x6, 0xFF);          // x6 = old byte
@@ -883,12 +890,12 @@ uintptr_t dynarec64_F0(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int ni
                         SETFLAGS(X_ALL, SF_SET_PENDING, NAT_FLAGS_FUSION);
                         addr = geted(dyn, addr, ninst, nextop, &wback, x5, x1, &fixedaddress, rex, LOCK_LOCK, 0, 1);
                         u8 = F8;
-                        ANDI(x6, xFlags, 1 << F_CF); // borrow-in, read once
-                        ADDI(x7, x6, u8);            // imm + borrow
                         ANDI(x2, wback, 3);
                         SLLI(x2, x2, 3);     // offset in bits
                         ANDI(x3, wback, ~3); // aligned addr
                         MARKLOCK;
+                        ANDI(x7, xFlags, 1 << F_CF); // borrow-in (recomputed on SC retry: x7 is clobbered in the loop)
+                        ADDI(x7, x7, u8);            // imm + borrow
                         LR_W(x4, x3, 1, 1);
                         SRL(x6, x4, x2);
                         ANDI(x6, x6, 0xFF);          // x6 = old byte
@@ -1264,7 +1271,7 @@ uintptr_t dynarec64_F0(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int ni
                 *ok = 0;
             } else {
                 INST_NAME("LOCK XCHG Ed, Gd");
-                GETGD;
+                GETGDsd;
                 addr = geted(dyn, addr, ninst, nextop, &wback, x2, x1, &fixedaddress, rex, LOCK_LOCK, 0, 0);
                 ANDI(x1, wback, (1 << (rex.w + 2)) - 1);
                 BNEZ_MARK3(x1);

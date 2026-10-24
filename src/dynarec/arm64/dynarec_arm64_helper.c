@@ -35,6 +35,8 @@ uintptr_t geted(dynarec_arm_t* dyn, uintptr_t addr, int ninst, uint8_t nextop, u
     int lock = l?((l==LOCK_LOCK)?1:2):0;
     if(lock==2) *l = 0;
 
+    if(dyn->insts[ninst].use_lrcpc) { absmax = 0; mask=0;}// there is no "Scaled" version, only Unscaled
+
     if(rex.is32bits && rex.is67)
         return geted16(dyn, addr, ninst, nextop, ed, hint, fixaddress, unscaled, absmax, mask, rex, s);
 
@@ -2265,9 +2267,9 @@ static void fpuCacheTransform(dynarec_arm_t* dyn, int ninst, int s1, int s2, int
             }
         }
     }
-    if(stack_cnt != cache_i2.stack) {
-        MESSAGE(LOG_DUMP, "\t    - adjust stack count %d -> %d -\n", stack_cnt, cache_i2.stack);
-        int a = stack_cnt - cache_i2.stack;
+    if(stack_cnt != cache_i2.stack || dyn->n.x87stack != cache_i2.x87stack) {
+        MESSAGE(LOG_DUMP, "\t    - adjust stack count %d -> %d / pending %d -> %d -\n", stack_cnt, cache_i2.stack, dyn->n.x87stack, cache_i2.x87stack);
+        int a = dyn->n.x87stack - cache_i2.x87stack;
         // Add x87stack to emu fpu_stack
         LDRw_U12(s3, xEmu, offsetof(x64emu_t, fpu_stack));
         if(a>0) {

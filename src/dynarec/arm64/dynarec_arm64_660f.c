@@ -951,9 +951,13 @@ uintptr_t dynarec64_660F(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int n
                             }
                         }
                     } else {
-                        MRS_nzcv(x3);
-                        BFIx(x3, xFlags, 29, 1); // set C
-                        MSR_nzcv(x3);      // load CC into ARM CF
+                        if(cpuext.flagm)
+                            RMIF(xFlags, 63, 0b0010);
+                        else {
+                            MRS_nzcv(x3);
+                            BFIx(x3, xFlags, 29, 1); // set C
+                            MSR_nzcv(x3);      // load CC into ARM CF
+                        }
                     }
                     IFX(X_CF) {
                         ADCSxw_REG(gd, gd, ed);
@@ -1417,10 +1421,17 @@ uintptr_t dynarec64_660F(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int n
                         Bcond(cPL, 4+4);
                         NEGxw_REG(x3, x3);
                         MOV32w(x4, (u8&1)?8:16);
-                        CMPSw_REG(x3, x4);
-                        CSELw(x3, x3, x4, cLO); // x3 is lmem
-                        CMPSw_REG(x2, x4);
-                        CSELw(x6, x2, x4, cLO); // x6 is lreg
+                        if(rex.w) {
+                            CMPSx_REG(x3, x4);
+                            CSELx(x3, x3, x4, cLO); // x3 is lmem
+                            CMPSx_REG(x2, x4);
+                            CSELx(x6, x2, x4, cLO); // x6 is lreg
+                        } else {
+                            CMPSw_REG(x3, x4);
+                            CSELw(x3, x3, x4, cLO); // x3 is lmem
+                            CMPSw_REG(x2, x4);
+                            CSELw(x6, x2, x4, cLO); // x6 is lreg
+                        }
                         CMPSw_REG(x6, x3);
                         CSELw(x5, x3, x6, cLT); // x5 is max(lmem, lreg)
                         CSELw(x2, x6, x3, cLT); // x2 is min(lmem, lreg)

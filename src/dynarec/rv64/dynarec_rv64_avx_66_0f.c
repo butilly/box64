@@ -171,6 +171,19 @@ uintptr_t dynarec64_AVX_66_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
             SD(x3, gback, gdoffset + 8);
             YMM0(gd);
             break;
+        case 0x17:
+            INST_NAME("VMOVHPD Ex, Gx");
+            nextop = F8;
+            if (MODREG) {
+                DEFAULT;
+                return addr;
+            }
+            GETGX();
+            addr = geted(dyn, addr, ninst, nextop, &wback, x2, x3, &fixedaddress, rex, NULL, 1, 0);
+            LD(x3, gback, gdoffset + 8);
+            SD(x3, wback, fixedaddress);
+            SMWRITE2();
+            break;
         case 0x28:
             INST_NAME("VMOVAPD Gx, Ex");
             nextop = F8;
@@ -273,7 +286,7 @@ uintptr_t dynarec64_AVX_66_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
         case 0x50:
             INST_NAME("VMOVMSKPD Gd, Ex");
             nextop = F8;
-            GETGD;
+            GETGDd;
             GETEX(x1, 0, vex.l ? 24 : 8);
             XOR(gd, gd, gd);
             for (int i = 0; i < 2; ++i) {
@@ -738,28 +751,20 @@ uintptr_t dynarec64_AVX_66_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
             v0 = fpu_get_scratch(dyn);
             v1 = fpu_get_scratch(dyn);
             for (int i = 0; i < 2; ++i) {
-                FLD(v0, vback, vxoffset + 8 * i);
-                FLD(v1, wback, fixedaddress + 8 * i);
-                FEQD(x3, v0, v0);
-                FEQD(x4, v1, v1);
-                AND(x3, x3, x4);
-                BEQ(x3, xZR, 4 + 3 * 4);
-                FLTD(x3, v0, v1);
-                BEQ(x3, xZR, 4 + 4); // continue
+                FLD(v0, wback, fixedaddress + 8 * i);
+                FLD(v1, vback, vxoffset + 8 * i);
+                FLTD(x3, v1, v0);
+                BNEZ(x3, 8);
                 FMVD(v1, v0);
                 FSD(v1, gback, gdoffset + 8 * i);
             }
             if (vex.l) {
                 GETEY();
                 for (int i = 0; i < 2; ++i) {
-                    FLD(v0, vback, vyoffset + 8 * i);
-                    FLD(v1, wback, fixedaddress + 8 * i);
-                    FEQD(x3, v0, v0);
-                    FEQD(x4, v1, v1);
-                    AND(x3, x3, x4);
-                    BEQ(x3, xZR, 4 + 3 * 4);
-                    FLTD(x3, v0, v1);
-                    BEQ(x3, xZR, 4 + 4); // continue
+                    FLD(v0, wback, fixedaddress + 8 * i);
+                    FLD(v1, vback, vyoffset + 8 * i);
+                    FLTD(x3, v1, v0);
+                    BNEZ(x3, 8);
                     FMVD(v1, v0);
                     FSD(v1, gback, gyoffset + 8 * i);
                 }
@@ -837,28 +842,20 @@ uintptr_t dynarec64_AVX_66_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
             v0 = fpu_get_scratch(dyn);
             v1 = fpu_get_scratch(dyn);
             for (int i = 0; i < 2; ++i) {
-                FLD(v0, vback, vxoffset + 8 * i);
-                FLD(v1, wback, fixedaddress + 8 * i);
-                FEQD(x3, v0, v0);
-                FEQD(x4, v1, v1);
-                AND(x3, x3, x4);
-                BEQ(x3, xZR, 4 + 3 * 4);
-                FLTD(x3, v1, v0);
-                BEQ(x3, xZR, 4 + 4); // continue
+                FLD(v0, wback, fixedaddress + 8 * i);
+                FLD(v1, vback, vxoffset + 8 * i);
+                FLTD(x3, v0, v1);
+                BNEZ(x3, 8);
                 FMVD(v1, v0);
                 FSD(v1, gback, gdoffset + 8 * i);
             }
             if (vex.l) {
                 GETEY();
                 for (int i = 0; i < 2; ++i) {
-                    FLD(v0, vback, vyoffset + 8 * i);
-                    FLD(v1, wback, fixedaddress + 8 * i);
-                    FEQD(x3, v0, v0);
-                    FEQD(x4, v1, v1);
-                    AND(x3, x3, x4);
-                    BEQ(x3, xZR, 4 + 3 * 4);
-                    FLTD(x3, v1, v0);
-                    BEQ(x3, xZR, 4 + 4); // continue
+                    FLD(v0, wback, fixedaddress + 8 * i);
+                    FLD(v1, vback, vyoffset + 8 * i);
+                    FLTD(x3, v0, v1);
+                    BNEZ(x3, 8);
                     FMVD(v1, v0);
                     FSD(v1, gback, gyoffset + 8 * i);
                 }
@@ -2268,7 +2265,7 @@ uintptr_t dynarec64_AVX_66_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
         case 0xC5:
             INST_NAME("VPEXTRW Gd, Ex, Ib");
             nextop = F8;
-            GETGD;
+            GETGDd;
             GETEX(x2, 1, 14);
             u8 = (F8) & 7;
             LHU(gd, wback, fixedaddress + 2 * u8);
@@ -3660,7 +3657,10 @@ uintptr_t dynarec64_AVX_66_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
                 FLD(d0, wback, fixedaddress + 8 * i);
                 FCVTLD(x3, d0, RD_RTZ);
                 SEXT_W(x5, x3);
-                BEQ(x5, x3, 8);
+                BEQ(x5, x3, 20);
+                LWU(x5, xEmu, offsetof(x64emu_t, mxcsr));
+                ORI(x5, x5, 1);
+                SW(x5, xEmu, offsetof(x64emu_t, mxcsr));
                 LUI(x3, 0x80000);
                 SW(x3, gback, gdoffset + 4 * i);
             }
@@ -3670,7 +3670,10 @@ uintptr_t dynarec64_AVX_66_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
                     FLD(d0, wback, fixedaddress + 8 * i);
                     FCVTLD(x3, d0, RD_RTZ);
                     SEXT_W(x5, x3);
-                    BEQ(x5, x3, 8);
+                    BEQ(x5, x3, 20);
+                    LWU(x5, xEmu, offsetof(x64emu_t, mxcsr));
+                    ORI(x5, x5, 1);
+                    SW(x5, xEmu, offsetof(x64emu_t, mxcsr));
                     LUI(x3, 0x80000);
                     SW(x3, gback, gdoffset + 8 + 4 * i);
                 }
@@ -3682,6 +3685,7 @@ uintptr_t dynarec64_AVX_66_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
             break;
         case 0xF7:
             INST_NAME("VMASKMOVDQU Gx, Ex");
+            UP32_READ(xRDI);
             nextop = F8;
             GETEX(x1, 0, 15);
             GETGX();
