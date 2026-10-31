@@ -38,17 +38,19 @@
 #define STRONGMEM_SEQ_WRITE  3 // The level of a barrier at every third memory store will be  put
 #define STRONGMEM_QEMU       4 // The level of a mimic to QEMU's strong memory model
 
-#define STRONGMEM_LEVEL() ((box64_wine && VolatileRangesContains(ip)) ? 0 : BOX64DRENV(dynarec_strongmem))
+#define STRONGMEM_LEVEL() (dyn->insts[ninst].x64.strongmem)
 
 #if STEP == 1
 
-#define SMWRITE()                                                \
-    do {                                                         \
-        /* Mark that current sequence writes to guest memory. */ \
-        /* This will be used in SMEND for last_write. */         \
-        dyn->smwrite = 1;                                        \
-        /* Mark that current opcode writes to guest memory. */   \
-        dyn->insts[ninst].will_write = 1;                        \
+#define SMWRITE()                                                   \
+    do {                                                            \
+        if(STRONGMEM_LEVEL()) {                                     \
+            /* Mark that current sequence writes to guest memory. */\
+            /* This will be used in SMEND for last_write. */        \
+            dyn->smwrite = 1;                                       \
+            /* Mark that current opcode writes to guest memory. */  \
+            dyn->insts[ninst].will_write = 1;                       \
+        }                                                           \
     } while (0)
 
 #define SMWRITELOCK(lock)                   \
@@ -113,7 +115,7 @@
                 }                                                        \
             } else {                                                     \
                 /* Mark that current sequence writes to guest memory. */ \
-                dyn->smwrite = 1;                                        \
+                if(STRONGMEM_LEVEL()) dyn->smwrite = 1;                  \
             }                                                            \
         }                                                                \
     } while (0)

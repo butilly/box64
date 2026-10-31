@@ -883,6 +883,9 @@ void my_box64signalhandler(int32_t sig, siginfo_t* info, void * ucntx)
     void* fpsimd = NULL;
     #warning Unhandled architecture
 #endif
+#ifndef PRINT_OPCODE
+#define PRINT_OPCODE(C, A)  "???"
+#endif
     dynablock_t* db = NULL;
     int db_searched = 0;
     uintptr_t x64pc = (uintptr_t)-1;
@@ -909,9 +912,9 @@ void my_box64signalhandler(int32_t sig, siginfo_t* info, void * ucntx)
                         old_pc_i = 0;
                     uint8_t* x64 = (uint8_t*)x64pc;
                     if(db)
-                        printf_log(LOG_INFO, "Special unaligned case fixed @%p, opcode=%08x (addr=%p, db=%p, x64pc=%p[%02hhX %02hhX %02hhX %02hhX %02hhX])\n", pc, *(uint32_t*)pc, addr, db, x64pc, x64[0], x64[1], x64[2], x64[3], x64[4], x64[5]);
+                        printf_log(LOG_INFO, "Special unaligned case fixed @%p, opcode=%08x(%s) (addr=%p, db=%p, x64pc=%p[%02hhX %02hhX %02hhX %02hhX %02hhX])\n", pc, *(uint32_t*)pc, PRINT_OPCODE(*(uint32_t*)pc, (uintptr_t)pc), addr, db, x64pc, x64[0], x64[1], x64[2], x64[3], x64[4], x64[5]);
                     else
-                        printf_log(LOG_INFO, "Special unaligned case fixed @%p, opcode=%08x (addr=%p)\n", pc, *(uint32_t*)pc, addr);
+                        printf_log(LOG_INFO, "Special unaligned case fixed @%p, opcode=%08x(%s) (addr=%p)\n", pc, *(uint32_t*)pc, PRINT_OPCODE(*(uint32_t*)pc, (uintptr_t)pc), addr);
                 }
             }
             return;
@@ -1007,27 +1010,20 @@ else dynarec_log(LOG_INFO, "SIGILL at %p/%p for Dynablock (%p, x64addr=%p) with 
         // access error, unprotect the block (and mark them dirty)
         CheckHotPage((uintptr_t)addr, prot);
         unprotectDB((uintptr_t)addr, 1, 1);    // unprotect 1 byte... But then, the whole page will be unprotected
+        int autosmc = 0;
+        if(db) {
+            autosmc = (addr >= db->x64_addr && addr < (db->x64_addr + db->x64_size))
+                || (!BOX64ENV(dynarec_dirty) && ALIGN_DOWN((uintptr_t)addr) == ALIGN_DOWN((uintptr_t)db->x64_addr) && !is_addr_autosmc(x64pc));
+        }
         int db_need_test = (db && !BOX64ENV(dynarec_dirty))?getNeedTest((uintptr_t)db->x64_addr):0;
-        if(db && ((addr>=db->x64_addr && addr<(db->x64_addr+db->x64_size)) || db_need_test)) {
+        if(db && (autosmc || db_need_test)) {
             emu = getEmuSignal(emu, p, db);
             // dynablock got auto-dirty! need to get out of it!!!
-            uintptr_t x64pc = getX64Address(db, (uintptr_t)pc);
             copyUCTXreg2Emu(emu, p, db, x64pc);
             adjustregs(emu, pc);
             if(db && db->arch_size)
                 ARCH_ADJUST(db, emu, p, x64pc);
-            int autosmc = (addr>=db->x64_addr && addr<(db->x64_addr+db->x64_size));
-            if(autosmc && BOX64ENV(dynarec_dirty)) {
-                // check if current block should be cut there
-                int inst = getX64AddressInst(db, (uintptr_t)pc);
-                // is it the last instruction
-                uintptr_t next = getX64InstAddress(db, inst+1);
-                if(next!=(uintptr_t)-1LL) {
-                    // there is a next, so lets mark the address and dirty the block
-                    mark_db_autosmc(db, x64pc);
-                }
-
-            }
+            if (autosmc) mark_db_autosmc(db, x64pc);
             dynarec_log(LOG_INFO, "Dynablock (%p, x64addr=%p, need_test=%d/%d/%d) %s, getting out at %p (%p)!\n", db, db->x64_addr, db_need_test, db->dirty, db->always_test, autosmc?"Auto-SMC":"unprotected", (void*)R_RIP, (void*)addr);
             //relockMutex(Locks);
             unlock_signal();

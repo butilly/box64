@@ -30,17 +30,11 @@
 #include "gdbjit.h"
 #include "perfmap.h"
 
-#define XMM0 0
-#define X870 XMM0 + 16
-#define EMM0 XMM0 + 16
-
 static int fpu_scratch_vreg(int n)
 {
     if (n < 7)
         return SCRATCH0 + n;
-    if (n < 13)
-        return 26 + (n - 7);
-    return ((n - 13) & 1) + 1;
+    abort();
 }
 
 // Get a FPU scratch reg
@@ -69,6 +63,7 @@ int fpu_get_scratch_lmul(dynarec_rv64_t* dyn, int lmul)
 void fpu_reset_scratch(dynarec_rv64_t* dyn)
 {
     dyn->e.fpu_scratch = 0;
+    dyn->pending_zero_flushed = 0;
 }
 // Get a x87 double reg
 int fpu_get_reg_x87(dynarec_rv64_t* dyn, int t, int n)
@@ -79,6 +74,7 @@ int fpu_get_reg_x87(dynarec_rv64_t* dyn, int t, int n)
     dyn->e.fpuused[i] = 1;
     dyn->e.extcache[i].n = n;
     dyn->e.extcache[i].t = t;
+    dyn->e.extcache[i].y = 0;
     dyn->e.news |= (1 << i);
     return EXTREG(i); // return a Dx
 }
@@ -99,6 +95,7 @@ int fpu_get_reg_emm(dynarec_rv64_t* dyn, int t, int emm)
     dyn->e.fpuused[i] = 1;
     dyn->e.extcache[i].t = t;
     dyn->e.extcache[i].n = emm;
+    dyn->e.extcache[i].y = 0;
     dyn->e.news |= (1 << (i));
     return EXTREG(i);
 }
@@ -110,6 +107,7 @@ int fpu_get_reg_xmm(dynarec_rv64_t* dyn, int t, int xmm)
     dyn->e.fpuused[i] = 1;
     dyn->e.extcache[i].t = t;
     dyn->e.extcache[i].n = xmm;
+    dyn->e.extcache[i].y = 0;
     dyn->e.news |= (1 << i);
     return EXTREG(i);
 }
@@ -121,6 +119,7 @@ static void fpu_reset_reg_extcache(dynarec_rv64_t* dyn, extcache_t* e)
         e->extcache[i].v = 0;
     }
     dyn->vector_sew = VECTOR_SEWNA;
+    dyn->vtype_restore = VECTOR_SEWNA;
 }
 void fpu_reset_reg(dynarec_rv64_t* dyn)
 {
@@ -403,6 +402,7 @@ int fpuCacheNeedsTransform(dynarec_rv64_t* dyn, int ninst)
                 if (dyn->insts[ninst].e.extcache[i].n != cache_i2.extcache[i].n) {    // not the same x64 reg
                     ret = 1;
                 } else if (dyn->insts[ninst].e.extcache[i].t == EXT_CACHE_XMMR && cache_i2.extcache[i].t == EXT_CACHE_XMMW) { /* nothing */
+                } else if (dyn->insts[ninst].e.extcache[i].t == EXT_CACHE_YMMR && cache_i2.extcache[i].t == EXT_CACHE_YMMW) { /* nothing */
                 } else
                     ret = 1;
             }
@@ -428,6 +428,19 @@ int sewNeedsTransform(dynarec_rv64_t* dyn, int ninst)
 
 void extcacheUnwind(extcache_t* cache)
 {
+    if (!cache->swapped && !cache->news && !cache->stack_push && !cache->stack_pop) {
+        int dirty = 0;
+        for (int i = 0; i < 16; ++i)
+            if (cache->olds[i].changed || cache->olds[i].purged) {
+                dirty = 1;
+                break;
+            }
+        if (!dirty) {
+            cache->barrier = 0;
+            cache->fpu_scratch = 0;
+            return;
+        }
+    }
     if (cache->swapped) {
         // unswap
         int a = -1;
@@ -538,9 +551,13 @@ void extcacheUnwind(extcache_t* cache)
                     break;
                 case EXT_CACHE_XMMR:
                 case EXT_CACHE_XMMW:
+                case EXT_CACHE_YMMR:
+                case EXT_CACHE_YMMW:
                     cache->ssecache[cache->extcache[i].n].reg = EXTREG(i);
                     cache->ssecache[cache->extcache[i].n].vector = 1;
-                    cache->ssecache[cache->extcache[i].n].write = (cache->extcache[i].t == EXT_CACHE_XMMW) ? 1 : 0;
+                    cache->ssecache[cache->extcache[i].n].write = (cache->extcache[i].t == EXT_CACHE_XMMW || cache->extcache[i].t == EXT_CACHE_YMMW) ? 1 : 0;
+                    cache->ssecache[cache->extcache[i].n].ymm = (cache->extcache[i].t == EXT_CACHE_YMMR || cache->extcache[i].t == EXT_CACHE_YMMW) ? 1 : cache->extcache[i].y;
+                    cache->ssecache[cache->extcache[i].n].ymm0 = (cache->ymm0 >> cache->extcache[i].n) & 1;
                     break;
                 case EXT_CACHE_ST_F:
                 case EXT_CACHE_ST_D:
@@ -558,6 +575,7 @@ void extcacheUnwind(extcache_t* cache)
             cache->fpuused[i] = 0;
         }
     }
+    sse_sync_all_cache_types(cache);
 }
 
 // will go badly if address is unaligned
@@ -627,6 +645,8 @@ const char* getCacheName(int t, int n)
         case EXT_CACHE_SCR: sprintf(buff, "Scratch"); break;
         case EXT_CACHE_XMMW: sprintf(buff, "XMM%d", n); break;
         case EXT_CACHE_XMMR: sprintf(buff, "xmm%d", n); break;
+        case EXT_CACHE_YMMW: sprintf(buff, "YMM%d", n); break;
+        case EXT_CACHE_YMMR: sprintf(buff, "ymm%d", n); break;
         case EXT_CACHE_NONE: buff[0] = '\0'; break;
     }
     return buff;
@@ -715,7 +735,7 @@ void inst_name_pass3(dynarec_native_t* dyn, int ninst, const char* name, rex_t r
     }
     if (!dyn->need_dump && !BOX64ENV(dynarec_gdbjit) && !BOX64ENV(dynarec_perf_map)) return;
 
-    static char buf[4096];
+    static char buf[65536];
     int length = sprintf(buf, "barrier=%d state=%d/%s(%s->%s), set=%X/%X, use=%X, need=%X/%X, fuse=%d/%d, sm=%d(%d/%d), sew@entry=%d, sew@exit=%d",
         dyn->insts[ninst].x64.barrier,
         dyn->insts[ninst].x64.state_flags,
@@ -753,6 +773,8 @@ void inst_name_pass3(dynarec_native_t* dyn, int ninst, const char* name, rex_t r
             case EXT_CACHE_SD: length += sprintf(buf + length, " f%d:%s", EXTREG(ii), getCacheName(dyn->insts[ninst].e.extcache[ii].t, dyn->insts[ninst].e.extcache[ii].n)); break;
             case EXT_CACHE_XMMR: length += sprintf(buf + length, " v%d:%s", EXTREG(ii), getCacheName(dyn->insts[ninst].e.extcache[ii].t, dyn->insts[ninst].e.extcache[ii].n)); break;
             case EXT_CACHE_XMMW: length += sprintf(buf + length, " v%d:%s", EXTREG(ii), getCacheName(dyn->insts[ninst].e.extcache[ii].t, dyn->insts[ninst].e.extcache[ii].n)); break;
+            case EXT_CACHE_YMMR: length += sprintf(buf + length, " v%d:%s", EXTREG(ii), getCacheName(dyn->insts[ninst].e.extcache[ii].t, dyn->insts[ninst].e.extcache[ii].n)); break;
+            case EXT_CACHE_YMMW: length += sprintf(buf + length, " v%d:%s", EXTREG(ii), getCacheName(dyn->insts[ninst].e.extcache[ii].t, dyn->insts[ninst].e.extcache[ii].n)); break;
             case EXT_CACHE_SCR: length += sprintf(buf + length, " f%d:%s", EXTREG(ii), getCacheName(dyn->insts[ninst].e.extcache[ii].t, dyn->insts[ninst].e.extcache[ii].n)); break;
             case EXT_CACHE_NONE:
             default: break;
@@ -872,6 +894,7 @@ void updateNativeFlags(dynarec_rv64_t* dyn)
                         }
                         dyn->insts[i].x64.use_flags = 0;
                         dyn->insts[j].nat_next_inst = i;
+                        dyn->insts[i].up32_read |= dyn->insts[j].up32_write32;
                         found = 1;
                         break;
                     } else if (j && dyn->insts[j].pred_sz == 1 && dyn->insts[j].pred[0] == j - 1
@@ -912,4 +935,340 @@ void fpu_save_and_unwind(dynarec_rv64_t* dyn, int ninst, extcache_t* cache)
 void fpu_unwind_restore(dynarec_rv64_t* dyn, int ninst, extcache_t* cache)
 {
     memcpy(&dyn->insts[ninst].e, cache, sizeof(extcache_t));
+}
+
+static int hasLinearPredecessor(const dynarec_rv64_t* dyn, int ninst)
+{
+    return ninst > 0 && dyn->insts[ninst].pred_sz == 1 && dyn->insts[ninst].pred[0] == ninst - 1;
+}
+
+int isUpper32Zero(dynarec_rv64_t* dyn, int ninst, int reg)
+{
+    if (!IS_GPR(reg))
+        return 0;
+
+    const uint16_t bit = (uint16_t)(1 << TO_X64(reg));
+    int current = ninst;
+    for (int depth = 0; depth < 4 && hasLinearPredecessor(dyn, current); ++depth) {
+        const instruction_rv64_t* prev = &dyn->insts[current - 1];
+        if (prev->x64.has_callret || prev->x64.barrier)
+            return 0;
+        if (prev->up32_write64 & bit) return prev->up32_zero & bit;
+        --current;
+    }
+    return 0;
+}
+
+static uint32_t getUsedVectorMask(const dynarec_rv64_t* dyn, int first, int last)
+{
+    uint32_t ret = 0;
+    for (int i = first; i <= last && i < dyn->size; ++i)
+        ret |= dyn->insts[i].vec_used;
+    return ret;
+}
+
+static int getFirstVectorUse(const dynarec_rv64_t* dyn, int first, int last, int reg)
+{
+    for (int i = first; i <= last && i < dyn->size; ++i)
+        if (dyn->insts[i].vec_used & (1u << reg))
+            return i;
+    return -1;
+}
+
+static void applyPreloadState(dynarec_rv64_t* dyn, int first, int first_use, int reg)
+{
+    for (int i = first; i < first_use; ++i) {
+        extcache_t* e = &dyn->insts[i].e;
+        sse_cache_t* s = &e->ssecache[reg];
+        s->reg = VREG(reg);
+        s->vector = 1;
+        s->single = 0;
+        s->write = 0;
+        s->ymm = 0;
+        s->ymm0 = (e->ymm0 >> reg) & 1;
+        e->fpuused[EXTIDX(VREG(reg))] = 1;
+        e->extcache[EXTIDX(VREG(reg))].n = reg;
+        e->extcache[EXTIDX(VREG(reg))].y = 0;
+        sse_sync_cache_type(e, reg);
+    }
+}
+
+void updatePreloads(dynarec_rv64_t* dyn)
+{
+    if (!cpuext.vector)
+        return;
+    for (int first = 0; first < dyn->size; ++first) {
+        if (dyn->insts[first].preload_xmmymm)
+            continue;
+        if (first)
+            break;
+        if (!dyn->insts[first].pred_sz)
+            continue;
+        int last = dyn->size + 1;
+        for (int j = 0; j < dyn->insts[first].pred_sz; ++j) {
+            int pred = dyn->insts[first].pred[j];
+            if (pred != first - 1 && pred < last)
+                last = pred;
+        }
+        if (last > dyn->size || last <= first)
+            continue;
+        if (first && !dyn->insts[first - 1].x64.has_next)
+            continue;
+        int straight = 1;
+        for (int i = first; i < last && straight; ++i) {
+            const instruction_rv64_t* inst = &dyn->insts[i];
+            if (!inst->x64.has_next || (inst->x64.barrier & BARRIER_FLOAT)
+                || inst->x64.has_callret)
+                straight = 0;
+        }
+        if (!straight)
+            continue;
+        uint32_t preload = getUsedVectorMask(dyn, first, last);
+        if (!preload)
+            continue;
+        uint32_t accepted = 0;
+        for (int reg = 0; reg < 16; ++reg) {
+            if (!(preload & (1u << reg)))
+                continue;
+            int first_use = getFirstVectorUse(dyn, first, last, reg);
+            if (first_use < 0)
+                continue;
+            int ok = 1;
+            int prev = first - 1;
+            if (prev >= 0 && dyn->insts[prev].e.ssecache[reg].v != -1)
+                ok = 0;
+            for (int i = first; i < first_use && ok; ++i)
+                if (dyn->insts[i].e.ssecache[reg].v != -1)
+                    ok = 0;
+            if (ok && dyn->insts[first_use].e.ssecache[reg].v == -1)
+                ok = 0;
+            if (!ok)
+                continue;
+            applyPreloadState(dyn, first, first_use, reg);
+            accepted |= 1u << reg;
+        }
+        if (accepted)
+            dyn->insts[first].preload_xmmymm = accepted;
+    }
+}
+
+void updateUpperLiveness(dynarec_rv64_t* dyn)
+{
+    int n = dyn->size;
+    if (n <= 0)
+        return;
+
+    size_t live_size = (size_t)n * sizeof(uint16_t);
+    size_t pending_size = (size_t)n * sizeof(uint16_t);
+    size_t work_size = (size_t)n * sizeof(int);
+    size_t list_size = (size_t)n * sizeof(uint8_t);
+    void* buffer = calloc(1, 5 * live_size + pending_size + work_size + list_size);
+    if (!buffer)
+        return;
+    uint16_t* live_in = (uint16_t*)buffer;
+    uint16_t* live_out = (uint16_t*)((char*)live_in + live_size);
+    uint16_t* live_ymm_in = (uint16_t*)((char*)live_out + live_size);
+    uint16_t* live_ymm_out = (uint16_t*)((char*)live_ymm_in + live_size);
+    uint16_t* pending_in = (uint16_t*)((char*)live_ymm_out + live_size);
+    uint16_t* pend_ymm = (uint16_t*)((char*)pending_in + pending_size);
+    int* work = (int*)((char*)pend_ymm + live_size);
+    uint8_t* on_list = (uint8_t*)((char*)work + work_size);
+
+    for (int i = 0; i < n; ++i) {
+        instruction_rv64_t* inst = &dyn->insts[i];
+        inst->promote_ymm = 0;
+        if (!inst->x64.alive || inst->pred_sz < 2 || (inst->x64.barrier & BARRIER_FLOAT))
+            continue;
+        const extcache_t* first = &dyn->insts[inst->pred[0]].e;
+        uint16_t promote = 0;
+        int need_barrier = 0;
+        for (int p = 1; p < inst->pred_sz && !need_barrier; ++p) {
+            const extcache_t* pe = &dyn->insts[inst->pred[p]].e;
+            uint16_t mask_diff = (uint16_t)(first->ymm0 ^ pe->ymm0);
+            uint16_t resolved = 0;
+            for (int r = 0; r < 16; ++r) {
+                const sse_cache_t* a = &first->ssecache[r];
+                const sse_cache_t* b = &pe->ssecache[r];
+                int a_cached = (a->v != -1 && a->vector);
+                int b_cached = (b->v != -1 && b->vector);
+                if (!a_cached || !b_cached)
+                    continue;
+                if (a->ymm == b->ymm && a->ymm0 == b->ymm0)
+                    continue;
+                int a_ok = a->ymm || (!a->ymm && a->ymm0);
+                int b_ok = b->ymm || (!b->ymm && b->ymm0);
+                if (a_ok && b_ok) {
+                    if (!a->ymm) promote |= (uint16_t)(1u << r);
+                    if (!b->ymm) promote |= (uint16_t)(1u << r);
+                    resolved |= (uint16_t)(1u << r);
+                    continue;
+                }
+                need_barrier = 1;
+                break;
+            }
+            if (mask_diff & (uint16_t)~resolved)
+                need_barrier = 1;
+        }
+        if (need_barrier)
+            inst->x64.barrier |= BARRIER_FLOAT;
+        else
+            inst->promote_ymm = promote;
+    }
+
+    int sp = 0;
+    for (int i = n - 1; i >= 0; --i) {
+        if (dyn->insts[i].x64.alive) {
+            work[sp++] = i;
+            on_list[i] = 1;
+        }
+    }
+    // backward analysis
+    while (sp > 0) {
+        int i = work[--sp];
+        on_list[i] = 0;
+        const instruction_rv64_t* inst = &dyn->insts[i];
+        if (!inst->x64.alive)
+            continue;
+        uint16_t combined_out = 0;
+        if (inst->x64.has_next && i + 1 < n && dyn->insts[i + 1].x64.alive)
+            combined_out |= live_in[i + 1];
+        if (inst->x64.jmp) {
+            if (inst->x64.jmp_insts >= 0 && inst->x64.jmp_insts < n)
+                combined_out |= live_in[inst->x64.jmp_insts];
+            else
+                combined_out = UINT16_MAX;
+        }
+        int has_internal_jump = inst->x64.jmp && inst->x64.jmp_insts >= 0 && inst->x64.jmp_insts < n;
+        if ((inst->x64.has_next && i == n - 1) || (!inst->x64.has_next && !has_internal_jump))
+            combined_out = UINT16_MAX;
+        live_out[i] = combined_out;
+
+        uint16_t combined_ymm_out = 0;
+        if (inst->x64.has_next && i + 1 < n && dyn->insts[i + 1].x64.alive)
+            combined_ymm_out |= live_ymm_in[i + 1];
+        if (inst->x64.jmp && inst->x64.jmp_insts >= 0 && inst->x64.jmp_insts < n)
+            combined_ymm_out |= live_ymm_in[inst->x64.jmp_insts];
+        if ((!inst->x64.has_next && !has_internal_jump) || (inst->x64.jmp && inst->x64.jmp_insts < 0))
+            combined_ymm_out = UINT16_MAX;
+        live_ymm_out[i] = combined_ymm_out;
+
+        uint16_t live_ymm_in_val = inst->ymm_upper_use | (combined_ymm_out & (uint16_t)~inst->ymm_upper_def);
+        if ((inst->x64.barrier & BARRIER_FLOAT) || inst->x64.has_callret)
+            live_ymm_in_val = UINT16_MAX;
+
+        uint16_t live_in_val = inst->up32_read | (combined_out & (uint16_t)~inst->up32_write64);
+        if ((live_in_val != live_in[i]) || (live_ymm_in_val != live_ymm_in[i])) {
+            live_in[i] = live_in_val;
+            live_ymm_in[i] = live_ymm_in_val;
+            for (int p = 0; p < inst->pred_sz; ++p) {
+                int j = inst->pred[p];
+                if (!on_list[j]) {
+                    work[sp++] = j;
+                    on_list[j] = 1;
+                }
+            }
+        }
+    }
+
+    for (int i = 0; i < n; ++i) {
+        instruction_rv64_t* inst = &dyn->insts[i];
+        inst->up32_skip = inst->up32_write32 & (uint16_t)~live_out[i];
+        inst->ymm_upper_live = live_ymm_out[i];
+    }
+
+    // forward analysis
+    memset(pending_in, 0, pending_size);
+    memset(pend_ymm, 0, live_size);
+    memset(on_list, 0, list_size);
+    sp = 0;
+    for (int i = 0; i < n; ++i) {
+        if (dyn->insts[i].x64.alive) {
+            work[sp++] = i;
+            on_list[i] = 1;
+        }
+    }
+    while (sp > 0) {
+        int i = work[--sp];
+        on_list[i] = 0;
+        instruction_rv64_t* inst = &dyn->insts[i];
+        if (!inst->x64.alive)
+            continue;
+
+        uint16_t merged_pending = 0;
+        uint16_t merged_ymm = 0;
+        for (int p = 0; p < inst->pred_sz; ++p) {
+            int j = inst->pred[p];
+            const instruction_rv64_t* pred = &dyn->insts[j];
+            merged_pending |= (pending_in[j] & (uint16_t)~pred->up32_write64) | pred->up32_skip;
+            uint16_t ymm_def = pred->ymm_pending_materialized ? UINT16_MAX : pred->ymm_upper_def;
+            merged_ymm |= (pend_ymm[j] & (uint16_t)~ymm_def) | (pred->ymm_zero & pred->ymm_upper_live);
+        }
+        if (inst->x64.barrier & BARRIER_FLOAT) merged_ymm = 0;
+        merged_ymm &= (uint16_t)~inst->promote_ymm;
+        if ((merged_pending != pending_in[i]) || (merged_ymm != pend_ymm[i])) {
+            pending_in[i] = merged_pending;
+            pend_ymm[i] = merged_ymm;
+            if (inst->x64.has_next && i + 1 < n && dyn->insts[i + 1].x64.alive && !on_list[i + 1]) {
+                work[sp++] = i + 1;
+                on_list[i + 1] = 1;
+            }
+            if (inst->x64.jmp && inst->x64.jmp_insts >= 0 && inst->x64.jmp_insts < n) {
+                int j = inst->x64.jmp_insts;
+                if (dyn->insts[j].x64.alive && !on_list[j]) {
+                    work[sp++] = j;
+                    on_list[j] = 1;
+                }
+            }
+        }
+    }
+    for (int i = 0; i < n; ++i) {
+        dyn->insts[i].up32_pending = pending_in[i];
+        dyn->insts[i].ymm_pending = pend_ymm[i];
+    }
+
+    free(buffer);
+}
+
+void updateRspMerge(dynarec_rv64_t* dyn, int is32bits)
+{
+    const int delta = is32bits ? 4 : 8;
+    int pending = 0;
+    int last_pushpop = -1;
+    for (int i = 0; i < dyn->size; ++i) {
+        instruction_rv64_t* inst = &dyn->insts[i];
+        inst->rsp_entry = 0;
+        inst->rsp_flush = 0;
+        inst->rsp_merge = 0;
+        int class = (inst->x64.alive && !BOX64ENV(dynarec_test)) ? inst->rsp_class : RSP_CLASS_BARRIER;
+        if (pending && (class == RSP_CLASS_BARRIER || (i == 0) || (inst->pred_sz != 1) || (inst->pred[0] != i - 1))) {
+            dyn->insts[last_pushpop].rsp_flush = pending;
+            pending = 0;
+            last_pushpop = -1;
+        }
+        switch (class) {
+            case RSP_CLASS_PUSH:
+                if (pending - (inst->rsp_span ? inst->rsp_span : delta) < -2048) {
+                    dyn->insts[last_pushpop].rsp_flush = pending;
+                    pending = 0;
+                }
+                inst->rsp_entry = pending;
+                inst->rsp_merge = 1;
+                pending -= (inst->rsp_span ? inst->rsp_span : delta);
+                last_pushpop = i;
+                break;
+            case RSP_CLASS_POP:
+                if (pending + (inst->rsp_span ? inst->rsp_span : delta) > 2047) {
+                    dyn->insts[last_pushpop].rsp_flush = pending;
+                    pending = 0;
+                }
+                inst->rsp_entry = pending;
+                inst->rsp_merge = 1;
+                pending += (inst->rsp_span ? inst->rsp_span : delta);
+                last_pushpop = i;
+                break;
+            default:
+                break;
+        }
+    }
+    if (pending) dyn->insts[last_pushpop].rsp_flush = pending;
 }

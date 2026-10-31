@@ -265,8 +265,9 @@ elseif(LARCH64)
     set(ASMFLAGS  -pipe -march=loongarch64)
 elseif(RV64)
     add_definitions(-DRV64)
-    set(CFLAGS -pipe -march=rv64gc)
+    set(CFLAGS -pipe -march=rv64gc -fno-tree-vectorize)
     set(ASMFLAGS  -pipe -march=rv64gc)
+    add_compile_options(-fno-tree-vectorize)
 elseif(PPC64LE)
     add_definitions(-DPPC64LE)
     set(CFLAGS -pipe -mcpu=power9)
@@ -1103,6 +1104,7 @@ if(RV64_DYNAREC)
         "${BOX64_ROOT}/src/dynarec/rv64/rv64_printer.c"
         "${BOX64_ROOT}/src/dynarec/rv64/dynarec_rv64_jmpnext.c"
         "${BOX64_ROOT}/src/dynarec/rv64/dynarec_rv64_consts.c"
+        "${BOX64_ROOT}/src/dynarec/rv64/rv64_mov_imm.c"
         "${BOX64_ROOT}/src/dynarec/rv64/updateflags_rv64.c"
         )
     set(DYNAREC_ASM

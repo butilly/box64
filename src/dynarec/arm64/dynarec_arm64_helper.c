@@ -35,6 +35,12 @@ uintptr_t geted(dynarec_arm_t* dyn, uintptr_t addr, int ninst, uint8_t nextop, u
     int lock = l?((l==LOCK_LOCK)?1:2):0;
     if(lock==2) *l = 0;
 
+    if(dyn->insts[ninst].use_lrcpc) { 
+        if(!unscaled) {
+            NOLRCPC();
+        } else { absmax = 0; mask=0;}
+    } // there is no "Scaled" version, only Unscaled
+
     if(rex.is32bits && rex.is67)
         return geted16(dyn, addr, ninst, nextop, ed, hint, fixaddress, unscaled, absmax, mask, rex, s);
 
@@ -343,7 +349,7 @@ void jump_to_epilog(dynarec_arm_t* dyn, uintptr_t ip, int reg, int ninst)
     TABLE64C(x2, const_epilog);
     SMEND();
     CHECK_DFNONE(0);
-    if (BOX64DRENV(dynarec_callret) >= 2)
+    if (BOX64DRENV(dynarec_callret) >= 3)
         doLeaveBlock(dyn, ninst, x4, x5, x6);
     BR(x2);
 }
@@ -419,7 +425,7 @@ void jump_to_next(dynarec_arm_t* dyn, uintptr_t ip, int reg, int ninst, int is32
     if(reg!=x1) {
         MOVx_REG(x1, xRIP);
     }
-    if(BOX64DRENV(dynarec_callret) >= 2 && !dyn->insts[ninst].x64.has_callret)
+    if(BOX64DRENV(dynarec_callret) >= 3 && !dyn->insts[ninst].x64.has_callret)
         doLeaveBlock(dyn, ninst, x4, x5, x6);
     // #ifdef HAVE_TRACE
     // The BLR form is only for gdb backtraces, but it breaks the
@@ -445,7 +451,7 @@ void ret_to_next(dynarec_arm_t* dyn, uintptr_t ip, int ninst, rex_t rex)
         // pop the actual return address for ARM stack
         LDPx_S7_postindex(xLR, x6, xSP, 16);
         SUBx_REG(x6, x6, xRIP); // is it the right address?
-        if (BOX64DRENV(dynarec_callret) >= 2)
+        if (BOX64DRENV(dynarec_callret) >= 3)
             doLeaveBlock(dyn, ninst, x4, x5, x3);
         CBNZx(x6, 2*4);
         RET(xLR);
@@ -542,6 +548,7 @@ void iret_to_next(dynarec_arm_t* dyn, uintptr_t ip, int ninst, int is32bits, int
 void call_c(dynarec_arm_t* dyn, int ninst, arm64_consts_t fnc, int reg, int ret, int saveflags, int savereg)
 {
     MAYUSE(fnc);
+    dyn->insts[ninst].host_call = 1;
     CHECK_DFNONE(1);
     #if STEP == 0
     dyn->insts[ninst].nat_flags_op = NAT_FLAG_OP_UNUSABLE;
@@ -601,6 +608,7 @@ void call_c(dynarec_arm_t* dyn, int ninst, arm64_consts_t fnc, int reg, int ret,
 void call_d(dynarec_arm_t* dyn, int ninst, arm64_consts_t fnc, int ret, int arg1, int arg2, int sav1, int sav2)
 {
     MAYUSE(fnc);
+    dyn->insts[ninst].host_call = 1;
     CHECK_DFNONE(1);
     #if STEP == 0
     dyn->insts[ninst].nat_flags_op = NAT_FLAG_OP_UNUSABLE;
@@ -647,6 +655,8 @@ void call_d(dynarec_arm_t* dyn, int ninst, arm64_consts_t fnc, int ret, int arg1
 void call_n(dynarec_arm_t* dyn, int ninst, void* fnc, int w)
 {
     MAYUSE(fnc);
+    dyn->insts[ninst].host_call = 1;
+    dyn->insts[ninst].host_call_clobber = 1;
     CHECK_DFNONE(1);
     #if STEP == 0
     dyn->insts[ninst].nat_flags_op = NAT_FLAG_OP_UNUSABLE;
@@ -1542,8 +1552,9 @@ int sse_get_reg_empty(dynarec_arm_t* dyn, int ninst, int s1, int a)
         dyn->n.xmm_used |= 1<<a;
         return dyn->n.ssecache[a].reg;
     }
+    if(!(dyn->n.xmm_used&(1<<a)))
+        dyn->n.xmm_unneeded |= 1<<a;
     dyn->n.xmm_used |= 1<<a;
-    dyn->n.xmm_unneeded |= 1<<a;
     dyn->n.ssecache[a].reg = fpu_get_reg_xmm(dyn, NEON_CACHE_XMMW, a);
     dyn->n.ssecache[a].write = 1; // it will be write...
     return dyn->n.ssecache[a].reg;
@@ -1552,10 +1563,13 @@ int sse_get_reg_empty(dynarec_arm_t* dyn, int ninst, int s1, int a)
 void sse_forget_reg(dynarec_arm_t* dyn, int ninst, int a)
 {
     dyn->n.xmm_used |= 1<<a;
-    if(dyn->n.ssecache[a].v==-1)
-        return;
-    if(dyn->n.neoncache[dyn->n.ssecache[a].reg].t == NEON_CACHE_XMMW) {
-        VSTR128_U12(dyn->n.ssecache[a].reg, xEmu, offsetof(x64emu_t, xmm[a]));
+    dyn->n.ymm_used |= 1<<a;
+    if(dyn->n.ssecache[a].v!=-1) {
+        if(dyn->n.neoncache[dyn->n.ssecache[a].reg].t == NEON_CACHE_XMMW) {
+            VSTR128_U12(dyn->n.ssecache[a].reg, xEmu, offsetof(x64emu_t, xmm[a]));
+        }
+        fpu_free_reg(dyn, dyn->n.ssecache[a].reg);
+        dyn->n.ssecache[a].v = -1;
     }
     // YMM part too
     if(is_avx_zero_unset(dyn, ninst, a)) {
@@ -1573,9 +1587,6 @@ void sse_forget_reg(dynarec_arm_t* dyn, int ninst, int a)
             fpu_free_reg(dyn, i);
 
     }
-    fpu_free_reg(dyn, dyn->n.ssecache[a].reg);
-    dyn->n.ssecache[a].v = -1;
-    return;
 }
 // purge the SSE cache for XMM0..XMM7 (to use before function native call)
 void sse_purge07cache(dynarec_arm_t* dyn, int ninst, int s1)
@@ -2122,6 +2133,8 @@ static void fpuCacheTransform(dynarec_arm_t* dyn, int ninst, int s1, int s2, int
     MESSAGE(LOG_DUMP, "\tFPU Cache Transform ---- ninst=%d -> %d\n", ninst, i2);
     uint32_t unneeded = dyn->insts[i2].n.xmm_unneeded | (dyn->insts[i2].n.ymm_unneeded<<16);
     if((!i2) || (dyn->insts[i2].x64.barrier&BARRIER_FLOAT)) {
+        if(dyn->insts[i2].preload_host_call)
+            unneeded &= ~dyn->insts[i2].preload_xmmymm;
         int need_purge = 0;
         if(dyn->n.stack_next)
             need_purge = 1;
@@ -2265,9 +2278,9 @@ static void fpuCacheTransform(dynarec_arm_t* dyn, int ninst, int s1, int s2, int
             }
         }
     }
-    if(stack_cnt != cache_i2.stack) {
-        MESSAGE(LOG_DUMP, "\t    - adjust stack count %d -> %d -\n", stack_cnt, cache_i2.stack);
-        int a = stack_cnt - cache_i2.stack;
+    if(stack_cnt != cache_i2.stack || dyn->n.x87stack != cache_i2.x87stack) {
+        MESSAGE(LOG_DUMP, "\t    - adjust stack count %d -> %d / pending %d -> %d -\n", stack_cnt, cache_i2.stack, dyn->n.x87stack, cache_i2.x87stack);
+        int a = dyn->n.x87stack - cache_i2.x87stack;
         // Add x87stack to emu fpu_stack
         LDRw_U12(s3, xEmu, offsetof(x64emu_t, fpu_stack));
         if(a>0) {

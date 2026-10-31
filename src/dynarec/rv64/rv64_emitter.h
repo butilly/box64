@@ -11,8 +11,10 @@
 #define SPLIT12(A) ((A) & 0xfff)
 
 // MOV64x/MOV32w is quite complex, so use a function for this
-#define MOV64x(A, B) rv64_move64(dyn, ninst, A, B)
-#define MOV32w(A, B) rv64_move32(dyn, ninst, A, B, 1)
+#define MOV64x(A, B)           rv64_move64(dyn, ninst, A, B, -1, -1)
+#define MOV64xs(A, B, S1)      rv64_move64(dyn, ninst, A, B, S1, -1)
+#define MOV64xss(A, B, S1, S2) rv64_move64(dyn, ninst, A, B, S1, S2)
+#define MOV32w(A, B)           rv64_move32(dyn, ninst, A, (int32_t)(B))
 #define MOV64xw(A, B)     \
     do {                  \
         if (rex.w) {      \
@@ -114,20 +116,20 @@
 // rd = rs1 + rs2
 #define ADDxw(rd, rs1, rs2) EMIT(R_type(0b0000000, rs2, rs1, 0b000, rd, rex.w ? 0b0110011 : 0b0111011))
 // rd = rs1 + rs2
-#define ADDz(rd, rs1, rs2)      \
-    do {                        \
-        if (!rex.is32bits) {    \
-            ADD(rd, rs1, rs2);  \
-        } else {                \
-            ADDW(rd, rs1, rs2); \
-            ZEROUP(rd);         \
-        }                       \
+#define ADDz(rd, rs1, rs2)       \
+    do {                         \
+        if (!rex.is32bits) {     \
+            ADD(rd, rs1, rs2);   \
+        } else {                 \
+            ADDW(rd, rs1, rs2);  \
+            ZEROUP32_RESULT(rd); \
+        }                        \
     } while (0)
 #define ADDy(rd, rs1, rs2)              \
     do {                                \
         if (rex.is32bits || rex.is67) { \
             ADDW(rd, rs1, rs2);         \
-            ZEROUP(rd);                 \
+            ZEROUP32_RESULT(rd);        \
         } else {                        \
             ADD(rd, rs1, rs2);          \
         }                               \
@@ -148,14 +150,14 @@
 // rd = rs1 - rs2
 #define SUBxw(rd, rs1, rs2) EMIT(R_type(0b0100000, rs2, rs1, 0b000, rd, rex.w ? 0b0110011 : 0b0111011))
 // rd = rs1 - rs2
-#define SUBz(rd, rs1, rs2)     \
-    do {                       \
-        if (!rex.is32bits) {   \
-            SUB(rd, rs1, rs2); \
-        } else {               \
-            SUB(rd, rs1, rs2); \
-            ZEROUP(rd);        \
-        }                      \
+#define SUBz(rd, rs1, rs2)       \
+    do {                         \
+        if (!rex.is32bits) {     \
+            SUB(rd, rs1, rs2);   \
+        } else {                 \
+            SUB(rd, rs1, rs2);   \
+            ZEROUP32_RESULT(rd); \
+        }                        \
     } while (0)
 // rd = rs1<<rs2
 #define SLL(rd, rs1, rs2) EMIT(R_type(0b0000000, rs2, rs1, 0b001, rd, 0b0110011))
@@ -166,10 +168,10 @@
 // rd = rs1 ^ rs2
 #define XOR(rd, rs1, rs2) EMIT(R_type(0b0000000, rs2, rs1, 0b100, rd, 0b0110011))
 // rd = rs1 ^ rs2
-#define XORxw(rd, rs1, rs2)     \
-    do {                        \
-        XOR(rd, rs1, rs2);      \
-        if (!rex.w) ZEROUP(rd); \
+#define XORxw(rd, rs1, rs2)              \
+    do {                                 \
+        XOR(rd, rs1, rs2);               \
+        if (!rex.w) ZEROUP32_RESULT(rd); \
     } while (0)
 // rd = rs1>>rs2 logical
 #define SRL(rd, rs1, rs2) EMIT(R_type(0b0000000, rs2, rs1, 0b101, rd, 0b0110011))
@@ -519,6 +521,64 @@
         PUSH1(reg);     \
     }
 
+#define PUSH1mz(reg)                                                                \
+    do {                                                                            \
+        if ((reg) != xRSP)                                                          \
+            dyn->insts[ninst].rsp_class = RSP_CLASS_PUSH;                           \
+        if (dyn->insts[ninst].rsp_merge) {                                          \
+            int entry = dyn->insts[ninst].rsp_entry;                                \
+            int flush = dyn->insts[ninst].rsp_flush;                                \
+            int imm5 = flush / (rex.is32bits ? 4 : 8);                              \
+            if (flush && !entry) {                                                  \
+                if (rex.is32bits)                                                   \
+                    PUSH1_32(reg);                                                  \
+                else                                                                \
+                    PUSH1(reg);                                                     \
+            } else if (flush && cpuext.xtheadmemidx && imm5 >= -16 && imm5 <= 15) { \
+                if (rex.is32bits)                                                   \
+                    TH_SWIB(reg, xRSP, imm5, 2);                                    \
+                else                                                                \
+                    TH_SDIB(reg, xRSP, imm5, 3);                                    \
+            } else {                                                                \
+                if (rex.is32bits)                                                   \
+                    SW(reg, xRSP, entry - 4);                                       \
+                else                                                                \
+                    SD(reg, xRSP, entry - 8);                                       \
+                if (flush) ADDI(xRSP, xRSP, flush);                                 \
+            }                                                                       \
+        } else if (rex.is32bits) {                                                  \
+            PUSH1_32(reg);                                                          \
+        } else {                                                                    \
+            PUSH1(reg);                                                             \
+        }                                                                           \
+    } while (0)
+
+#define POP1mz(reg)                                      \
+    do {                                                 \
+        if ((reg) != xRSP)                               \
+            dyn->insts[ninst].rsp_class = RSP_CLASS_POP; \
+        if (dyn->insts[ninst].rsp_merge) {               \
+            int entry = dyn->insts[ninst].rsp_entry;     \
+            int flush = dyn->insts[ninst].rsp_flush;     \
+            if (flush && !entry) {                       \
+                if (rex.is32bits)                        \
+                    POP1_32(reg);                        \
+                else                                     \
+                    POP1(reg);                           \
+            } else {                                     \
+                if (rex.is32bits)                        \
+                    LWU(reg, xRSP, entry);               \
+                else                                     \
+                    LD(reg, xRSP, entry);                \
+                if (flush) ADDI(xRSP, xRSP, flush);      \
+            }                                            \
+        } else if (rex.is32bits) {                       \
+            POP1_32(reg);                                \
+        } else {                                         \
+            POP1(reg);                                   \
+        }                                                \
+    } while (0)
+
 #define PUSH1_16(reg)                             \
     do {                                          \
         if (cpuext.xtheadmemidx && reg != xRSP) { \
@@ -601,14 +661,14 @@
             ADDI(rd, rs1, imm12);  \
         } else {                   \
             ADDIW(rd, rs1, imm12); \
-            ZEROUP(rd);            \
+            ZEROUP32_RESULT(rd);   \
         }                          \
     } while (0)
 #define ADDIy(rd, rs1, imm12)           \
     do {                                \
         if (rex.is32bits || rex.is67) { \
             ADDIW(rd, rs1, imm12);      \
-            ZEROUP(rd);                 \
+            ZEROUP32_RESULT(rd);        \
         } else {                        \
             ADDI(rd, rs1, imm12);       \
         }                               \
@@ -629,7 +689,7 @@
 #define ADDSLy(rd, rs1, rs2, imm2, scratch) \
     if (rex.is32bits || rex.is67) {         \
         ADDSL(rd, rs1, rs2, imm2, scratch); \
-        ZEROUP(rd);                         \
+        ZEROUP32_RESULT(rd);                \
     } else {                                \
         ADDSL(rd, rs1, rs2, imm2, scratch); \
     }
@@ -649,7 +709,8 @@
             SLL(rd, rs1, rs2);  \
         } else {                \
             SLLW(rd, rs1, rs2); \
-            ZEROUP(rd);         \
+            UP32_WRITE32(rd);   \
+            ZEROUP_RESULT(rd);  \
         }                       \
     } while (0)
 
@@ -659,7 +720,8 @@
             SRL(rd, rs1, rs2);  \
         } else {                \
             SRLW(rd, rs1, rs2); \
-            ZEROUP(rd);         \
+            UP32_WRITE32(rd);   \
+            ZEROUP_RESULT(rd);  \
         }                       \
     } while (0)
 
@@ -669,7 +731,8 @@
             SRA(rd, rs1, rs2);  \
         } else {                \
             SRAW(rd, rs1, rs2); \
-            ZEROUP(rd);         \
+            UP32_WRITE32(rd);   \
+            ZEROUP_RESULT(rd);  \
         }                       \
     } while (0)
 
@@ -682,14 +745,16 @@
             SLLI(rd, rs1, imm);  \
         } else {                 \
             SLLIW(rd, rs1, imm); \
-            ZEROUP(rd);          \
+            UP32_WRITE32(rd);    \
+            ZEROUP_RESULT(rd);   \
         }                        \
     } while (0)
 #define SLLIy(rd, rs1, imm)             \
     do {                                \
         if (rex.is32bits || rex.is67) { \
             SLLIW(rd, rs1, imm);        \
-            ZEROUP(rd);                 \
+            UP32_WRITE32(rd);           \
+            ZEROUP_RESULT(rd);          \
         } else {                        \
             SLLI(rd, rs1, imm);         \
         }                               \
@@ -697,14 +762,17 @@
 // Shift Right Logical Immediate, 32-bit, sign-extended
 #define SRLIW(rd, rs1, imm5) EMIT(I_type(imm5, rs1, 0b101, rd, 0b0011011))
 // Shift Right Logical Immediate
-#define SRLIxw(rd, rs1, imm)            \
-    do {                                \
-        if (rex.w) {                    \
-            SRLI(rd, rs1, imm);         \
-        } else {                        \
-            SRLIW(rd, rs1, imm);        \
-            if ((imm) == 0) ZEROUP(rd); \
-        }                               \
+#define SRLIxw(rd, rs1, imm)       \
+    do {                           \
+        if (rex.w) {               \
+            SRLI(rd, rs1, imm);    \
+        } else {                   \
+            SRLIW(rd, rs1, imm);   \
+            if ((imm) == 0) {      \
+                UP32_WRITE32(rd);  \
+                ZEROUP_RESULT(rd); \
+            }                      \
+        }                          \
     } while (0)
 // Shift Right Arithmetic Immediate, 32-bit, sign-extended
 #define SRAIW(rd, rs1, imm5) EMIT(I_type((imm5) | (0b0100000 << 5), rs1, 0b101, rd, 0b0011011))
@@ -715,7 +783,8 @@
             SRAI(rd, rs1, imm);  \
         } else {                 \
             SRAIW(rd, rs1, imm); \
-            ZEROUP(rd);          \
+            UP32_WRITE32(rd);    \
+            ZEROUP_RESULT(rd);   \
         }                        \
     } while (0)
 
@@ -1134,14 +1203,14 @@
     }
 
 // Insert low 16bits in rs to low 16bits of rd
-#define INSH(rd, rs, s1, s2, init_s1, zexth_rs) \
-    if (init_s1) LUI(s1, 0xffff0);              \
-    AND(rd, rd, s1);                            \
-    if (zexth_rs) {                             \
-        ZEXTH(s2, rs);                          \
-        OR(rd, rd, s2);                         \
-    } else {                                    \
-        OR(rd, rd, rs);                         \
+#define INSH(rd, rs, s1, s2, init_s1, zexth_rs)  \
+    if (init_s1) MOV64x(s1, 0xFFFFFFFFFFFF0000); \
+    AND(rd, rd, s1);                             \
+    if (zexth_rs) {                              \
+        ZEXTH(s2, rs);                           \
+        OR(rd, rd, s2);                          \
+    } else {                                     \
+        OR(rd, rd, rs);                          \
     }
 
 // Insert low 16bits in rs to low 16bits of rd
@@ -1224,7 +1293,7 @@
             OR(s1, s1, s3);            \
             OR(s1, s1, s4);            \
             SLLIW(s3, rs, 8);          \
-            LUI(s2, 0xff0);            \
+            MOV32w(s2, 0xFF0000);      \
             AND(s3, s3, s2);           \
             OR(rd, s1, s3);            \
         }                              \
@@ -1260,15 +1329,14 @@
 // Single-bit Set (Immediate)
 #define BSETI_(rd, rs1, imm) EMIT(R_type(0b0010100, imm, rs1, 0b001, rd, 0b0010011))
 // Single-bit Set (Immediate), with fallback (s0 is used as a scratch register)
-#define BSETI(rd, rs1, imm, s0)   \
-    do {                          \
-        if (cpuext.zbs)           \
-            BSETI_(rd, rs1, imm); \
-        else {                    \
-            ADDI(s0, xZR, 1);     \
-            SLLI(s0, s0, (imm));  \
-            OR(rd, rs1, s0);      \
-        }                         \
+#define BSETI(rd, rs1, imm, s0)        \
+    do {                               \
+        if (cpuext.zbs)                \
+            BSETI_(rd, rs1, imm);      \
+        else {                         \
+            MOV64x(s0, 1ULL << (imm)); \
+            OR(rd, rs1, s0);           \
+        }                              \
     } while (0)
 
 // Single-bit Extract (Register)
