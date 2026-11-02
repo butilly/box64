@@ -1686,6 +1686,9 @@ uintptr_t GetSegmentBaseEmu(x64emu_t* emu, int seg)
 #ifdef BOX64EC
     if (seg == _GS)
         return emu->win64_teb;
+#endif
+#ifdef _WIN32
+    /* Wine seeds FS from the current TEB; the OS segment lookup is a stub. */
     if (seg == _FS)
         return emu->segs_offs[_FS];
 #endif
