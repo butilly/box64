@@ -134,18 +134,19 @@ uintptr_t dynarec64_F30F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
         case 0x2C:
             INST_NAME("CVTTSS2SI Gd, Ex");
             nextop = F8;
-            GETGD;
+            GETGDd;
             GETEXSS(d0, 0);
             if (!BOX64ENV(dynarec_fastround)) {
                 FSFLAGSI(0); // // reset all bits
             }
             FCVTSxw(gd, d0, RD_RTZ);
-            if (!rex.w)
-                ZEROUP(gd);
+            if (NEED_ZEROUP(gd))
+                ZEROUP_RESULT(gd);
             if (!BOX64ENV(dynarec_fastround)) {
                 FRFLAGS(x5); // get back FPSR to check the IOC bit
                 ANDI(x5, x5, (1 << FR_NV) | (1 << FR_OF));
                 CBZ_NEXT(x5);
+                emit_mxcsr_raise_invalid(x5);
                 if (rex.w) {
                     MOV64x(gd, 0x8000000000000000LL);
                 } else {
@@ -156,7 +157,7 @@ uintptr_t dynarec64_F30F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
         case 0x2D:
             INST_NAME("CVTSS2SI Gd, Ex");
             nextop = F8;
-            GETGD;
+            GETGDd;
             GETEXSS(d0, 0);
             if (!BOX64ENV(dynarec_fastround)) {
                 FSFLAGSI(0); // // reset all bits
@@ -164,12 +165,13 @@ uintptr_t dynarec64_F30F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
             u8 = sse_setround(dyn, ninst, x5, x6);
             FCVTSxw(gd, d0, RD_DYN);
             x87_restoreround(dyn, ninst, u8);
-            if (!rex.w)
-                ZEROUP(gd);
+            if (NEED_ZEROUP(gd))
+                ZEROUP_RESULT(gd);
             if (!BOX64ENV(dynarec_fastround)) {
                 FRFLAGS(x5); // get back FPSR to check the IOC bit
                 ANDI(x5, x5, (1 << FR_NV) | (1 << FR_OF));
                 CBZ_NEXT(x5);
+                emit_mxcsr_raise_invalid(x5);
                 if (rex.w) {
                     MOV64x(gd, 0x8000000000000000LL);
                 } else {
@@ -221,7 +223,7 @@ uintptr_t dynarec64_F30F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
                 FEQS(x5, v1, v1);
                 BNEZ_MARK(x5);
                 BNEZ_MARK2(x4);
-                LUI(x5, 0x00400);
+                MOV32w(x5, 0x400000);
                 OR(x3, x3, x5);
                 FMVWX(v1, x3);
                 B_MARK_nocond;
@@ -237,7 +239,7 @@ uintptr_t dynarec64_F30F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
             GETGXSS_empty(v1);
             q0 = fpu_get_scratch(dyn); // 1.0f
             d0 = fpu_get_scratch(dyn); // 0.0f
-            LUI(x3, 0x3F800); // 1.0f
+            MOV32w(x3, 0x3F800000);
             FMVWX(q0, x3);
             if (!BOX64ENV(dynarec_fastnan)) {
                 MOV32w(x6, 0x00400000);
@@ -271,7 +273,7 @@ uintptr_t dynarec64_F30F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
             GETEXSS(v0, 0);
             GETGXSS_empty(v1);
             q0 = fpu_get_scratch(dyn);
-            LUI(x3, 0x3F800); // 1.0f
+            MOV32w(x3, 0x3F800000);
             FMVWX(q0, x3);
             if (!BOX64ENV(dynarec_fastnan)) {
                 MOV32w(x6, 0x00400000);
@@ -387,6 +389,7 @@ uintptr_t dynarec64_F30F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
                     FRFLAGS(x5); // get back FPSR to check the IOC bit
                     ANDI(x5, x5, (1 << FR_NV) | (1 << FR_OF));
                     BEQZ_MARKi(x5, i);
+                    emit_mxcsr_raise_invalid(x5);
                     MOV32w(x3, 0x80000000);
                     MARKi(i);
                 }
@@ -425,15 +428,9 @@ uintptr_t dynarec64_F30F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
             nextop = F8;
             GETGXSS(d0);
             GETEXSS(d1, 0);
-            FEQS(x2, d0, d0);
-            FEQS(x3, d1, d1);
-            AND(x2, x2, x3);
-            BEQ_MARK(x2, xZR);
-            FLES(x2, d1, d0);
-            BEQ_MARK2(x2, xZR);
-            MARK;
+            FLTS(x2, d0, d1);
+            BNEZ(x2, 8);
             FMVS(d0, d1);
-            MARK2;
             break;
         case 0x5E:
             INST_NAME("DIVSS Gx, Ex");
@@ -467,15 +464,9 @@ uintptr_t dynarec64_F30F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
             nextop = F8;
             GETGXSS(d0);
             GETEXSS(d1, 0);
-            FEQS(x2, d0, d0);
-            FEQS(x3, d1, d1);
-            AND(x2, x2, x3);
-            BEQ_MARK(x2, xZR);
-            FLES(x2, d0, d1);
-            BEQ_MARK2(x2, xZR);
-            MARK;
+            FLTS(x2, d1, d0);
+            BNEZ(x2, 8);
             FMVS(d0, d1);
-            MARK2;
             break;
         case 0x6F:
             INST_NAME("MOVDQU Gx,Ex");
@@ -573,6 +564,7 @@ uintptr_t dynarec64_F30F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
                             INST_NAME("RDFSBASE");
                         }
                         ed = TO_NAT((nextop & 7) + (rex.b << 3));
+                        MARKREGd(ed);
                         int seg = _FS + ((nextop >> 3) & 7);
                         grab_segdata(dyn, addr, ninst, x4, seg);
                         MVxw(ed, x4);
@@ -591,6 +583,7 @@ uintptr_t dynarec64_F30F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
                             INST_NAME("WRFSBASE");
                         }
                         ed = TO_NAT((nextop & 7) + (rex.b << 3));
+                        MARKREGs(ed);
                         int seg = _FS + ((nextop >> 3) & 7) - 2;
                         if (!rex.w) {
                             ZEXTW2(x4, ed);
@@ -620,7 +613,7 @@ uintptr_t dynarec64_F30F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
             SET_DFNONE();
             nextop = F8;
             GETED(0);
-            GETGD;
+            GETGDsd;
             if (!rex.w && MODREG) {
                 ZEXTW2(x4, ed);
                 ed = x4;
@@ -635,22 +628,14 @@ uintptr_t dynarec64_F30F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
                 CPOPxw(gd, ed);
             } else {
                 if (rex.w) {
-                    // x7 = 0x5555555555555555
-                    LUI(x7, 0x55555);
-                    ADDIW(x7, x7, 0x555);
-                    SLLI(x6, x7, 32);
-                    ADD(x7, x7, x6);
+                    MOV64xs(x7, 0x5555555555555555ULL, x6);
 
                     // v = v - ((v >> 1) & x7)
                     SRLI(x5, ed, 1);
                     AND(x5, x5, x7);
                     SUB(x5, ed, x5);
 
-                    // x3 = 0x3333333333333333
-                    LUI(x3, 0x33333);
-                    ADDIW(x3, x3, 0x333);
-                    SLLI(x6, x3, 32);
-                    ADD(x3, x3, x6);
+                    MOV64xs(x3, 0x3333333333333333ULL, x6);
 
                     // v = (v & x3) + ((v >> 2) & x3);
                     SRLI(x7, x5, 2);
@@ -658,39 +643,27 @@ uintptr_t dynarec64_F30F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
                     AND(x5, x5, x3);
                     ADD(x5, x5, x7);
 
-                    // x3 = 0x0F0F0F0F0F0F0F0F
-                    LUI(x3, 0xF0F1);
-                    ADDIW(x3, x3, 0xF0F);
-                    SLLI(x6, x3, 32);
-                    ADD(x3, x3, x6);
+                    MOV64xs(x3, 0x0F0F0F0F0F0F0F0FULL, x6);
 
                     // v = (v + (v >> 4) & x3)
                     SRLI(x7, x5, 4);
                     ADD(x5, x5, x7);
                     AND(x5, x5, x3);
 
-                    // x3 = 0x0101010101010101
-                    LUI(x3, 0x1010);
-                    ADDIW(x3, x3, 0x101);
-                    SLLI(x6, x3, 32);
-                    ADD(x3, x3, x6);
+                    MOV64xs(x3, 0x0101010101010101ULL, x6);
 
                     // count = (v * x3) >> 56
                     MUL(gd, x5, x3);
                     SRLI(gd, gd, 56);
                 } else {
-                    // x7 = 0x55555555uLL
-                    LUI(x7, 0x55555);
-                    ADDIW(x7, x7, 0x555);
+                    MOV32w(x7, 0x55555555);
 
                     // v = v - ((v >> 1) & x7)
                     SRLI(x5, ed, 1);
                     AND(x5, x5, x7);
                     SUB(x5, ed, x5);
 
-                    // x3 = 0x33333333uLL
-                    LUI(x3, 0x33333);
-                    ADDIW(x3, x3, 0x333);
+                    MOV32w(x3, 0x33333333);
 
                     // v = (v & x3) + ((v >> 2) & x3);
                     SRLI(x7, x5, 2);
@@ -698,18 +671,14 @@ uintptr_t dynarec64_F30F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
                     AND(x5, x5, x3);
                     ADD(x5, x5, x7);
 
-                    // x3 = 0x0F0F0F0FuLL
-                    LUI(x3, 0xF0F1);
-                    ADDIW(x3, x3, 0xF0F);
+                    MOV32w(x3, 0x0F0F0F0F);
 
                     // v = (v + (v >> 4) & x3)
                     SRLI(x7, x5, 4);
                     ADD(x5, x5, x7);
                     AND(x5, x5, x3);
 
-                    // x3 = 01010101uLL
-                    LUI(x3, 0x1010);
-                    ADDIW(x3, x3, 0x101);
+                    MOV32w(x3, 0x01010101);
 
                     // count = (v * x3) >> 24
                     MULW(gd, x5, x3);
@@ -727,7 +696,7 @@ uintptr_t dynarec64_F30F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
             SET_DFNONE();
             nextop = F8;
             GETED(0);
-            GETGD;
+            GETGDsd;
             CLEAR_FLAGS();
             if (!rex.w && MODREG) {
                 ZEXTW2(x4, ed);
@@ -752,7 +721,7 @@ uintptr_t dynarec64_F30F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
             SET_DFNONE();
             nextop = F8;
             GETED(0);
-            GETGD;
+            GETGDsd;
             CLEAR_FLAGS();
             if (!rex.w && MODREG) {
                 ZEXTW2(x4, ed);
@@ -853,7 +822,7 @@ uintptr_t dynarec64_F30F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
                     nextop = F8;
                     READFLAGS(X_OF);
                     SETFLAGS(X_OF, SF_SUBSET, NAT_FLAGS_NOFUSION);
-                    GETGD;
+                    GETGDsd;
                     GETED(0);
                     BEXTI(x3, xFlags, F_OF2);
                     IFX (X_OF) {
@@ -878,7 +847,7 @@ uintptr_t dynarec64_F30F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
                     } else {
                         ADDxw(x5, gd, ed);
                         ADDxw(gd, x5, x3);
-                        if (!rex.w) ZEROUP(gd);
+                        if (NEED_ZEROUP(gd)) ZEROUP_RESULT(gd);
                     }
                     break;
                 default:

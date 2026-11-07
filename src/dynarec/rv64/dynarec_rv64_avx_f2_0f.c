@@ -155,7 +155,7 @@ uintptr_t dynarec64_AVX_F2_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
         case 0x2C:
             INST_NAME("VCVTTSD2SI Gd, Ex");
             nextop = F8;
-            GETGD;
+            GETGDd;
             d0 = fpu_get_scratch(dyn);
             if (MODREG) {
                 ed = (nextop & 7) + (rex.b << 3);
@@ -184,7 +184,7 @@ uintptr_t dynarec64_AVX_F2_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
         case 0x2D:
             INST_NAME("VCVTSD2SI Gd, Ex");
             nextop = F8;
-            GETGD;
+            GETGDd;
             d0 = fpu_get_scratch(dyn);
             if (MODREG) {
                 ed = (nextop & 7) + (rex.b << 3);
@@ -336,15 +336,9 @@ uintptr_t dynarec64_AVX_F2_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
             v1 = fpu_get_scratch(dyn);
             FLD(v0, vback, vxoffset + 0);
             FLD(v1, wback, fixedaddress + 0);
-            FEQD(x2, v0, v0);
-            FEQD(x3, v1, v1);
-            AND(x2, x2, x3);
-            BEQ_MARK(x2, xZR);
-            FLED(x2, v1, v0);
-            BEQ_MARK2(x2, xZR);
-            MARK;
+            FLTD(x2, v0, v1);
+            BNEZ(x2, 8);
             FMVD(v0, v1);
-            MARK2;
             FSD(v0, gback, gdoffset + 0);
             if (gd != vex.v) {
                 LD(x3, vback, vxoffset + 8);
@@ -410,7 +404,7 @@ uintptr_t dynarec64_AVX_F2_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
                 SRLI(x4, x4, 29);
                 MOV32w(x5, 0x007fffff);
                 AND(x4, x4, x5);
-                LUI(x5, 0x7fc00);
+                MOV32w(x5, 0x7FC00000);
                 OR(x4, x4, x5);
                 OR(x4, x4, x6);
                 FMVWX(v0, x4);
@@ -435,15 +429,9 @@ uintptr_t dynarec64_AVX_F2_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
             v1 = fpu_get_scratch(dyn);
             FLD(v0, vback, vxoffset + 0);
             FLD(v1, wback, fixedaddress + 0);
-            FEQD(x2, v0, v0);
-            FEQD(x3, v1, v1);
-            AND(x2, x2, x3);
-            BEQ_MARK(x2, xZR);
-            FLED(x2, v0, v1);
-            BEQ_MARK2(x2, xZR);
-            MARK;
+            FLTD(x2, v1, v0);
+            BNEZ(x2, 8);
             FMVD(v0, v1);
-            MARK2;
             FSD(v0, gback, gdoffset + 0);
             if (gd != vex.v) {
                 LD(x3, vback, vxoffset + 8);
@@ -598,7 +586,7 @@ uintptr_t dynarec64_AVX_F2_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
         case 0x7D:
             INST_NAME("VHSUBPS Gx, Vx, Ex");
             nextop = F8;
-            GETEX(x2, 0, vex.l ? 24 : 8);
+            GETEX(x2, 0, vex.l ? 28 : 12);
             GETGX();
             GETGY();
             GETVX();
@@ -781,7 +769,7 @@ uintptr_t dynarec64_AVX_F2_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
         case 0x7C:
             INST_NAME("VHADDPS Gx, Vx, Ex");
             nextop = F8;
-            GETEX(x2, 0, vex.l ? 24 : 8);
+            GETEX(x2, 0, vex.l ? 28 : 12);
             GETGX();
             GETGY();
             GETVX();
@@ -944,7 +932,7 @@ uintptr_t dynarec64_AVX_F2_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
                 FCVTLD(x3, d0, RD_DYN);
                 SEXT_W(x5, x3);
                 BEQ(x5, x3, 8);
-                LUI(x3, 0x80000);
+                MOV64x(x3, (int64_t)INT32_MIN);
                 SW(x3, gback, gdoffset + 4 * i);
             }
             if (vex.l) {
@@ -954,7 +942,7 @@ uintptr_t dynarec64_AVX_F2_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
                     FCVTLD(x3, d0, RD_DYN);
                     SEXT_W(x5, x3);
                     BEQ(x5, x3, 8);
-                    LUI(x3, 0x80000);
+                    MOV64x(x3, (int64_t)INT32_MIN);
                     SW(x3, gback, gdoffset + 8 + 4 * i);
                 }
             } else {
