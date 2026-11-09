@@ -335,7 +335,8 @@ NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
         }
     }
 
-    if (!box64_is_addr_in_jit(ULongToPtr(ctx->Pc)))
+    /* The host JIT can be above 4 GiB even when the guest is 32-bit. */
+    if (!box64_is_addr_in_jit((void*)(uintptr_t)ctx->Pc))
         return STATUS_SUCCESS;
 
     /* Replace the host context with one captured before JIT entry so host code can unwind */
