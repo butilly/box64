@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -494,7 +493,7 @@ int fpuCacheNeedsTransform(dynarec_arm_t* dyn, int ninst) {
     if(dyn->insts[ninst].ymm0_out && (dyn->insts[ninst].ymm0_out&~dyn->insts[i2].ymm0_in&~dyn->insts[i2].n.ymm_unneeded))
         return 1;
     neoncache_t cache_i2 = dyn->insts[i2].n;
-    neoncacheUnwind(&cache_i2);
+    neoncacheUnwind(&cache_i2, dyn->insts[i2].preload_xmmymm);
 
     for(int i=0; i<32; ++i) {
         if(dyn->insts[ninst].n.neoncache[i].v) {       // there is something at ninst for i
@@ -522,7 +521,7 @@ int fpuCacheNeedsTransform(dynarec_arm_t* dyn, int ninst) {
     return 0;
 }
 
-void neoncacheUnwind(neoncache_t* cache)
+void neoncacheUnwind(neoncache_t* cache, uint32_t preload)
 {
     if(cache->swapped) {
         // unswap
@@ -548,8 +547,17 @@ void neoncacheUnwind(neoncache_t* cache)
     if(cache->news) {
         // remove the newly created neoncache
         for(int i=0; i<32; ++i)
-            if(cache->news&(1<<i))
-                cache->neoncache[i].v = 0;
+            if(cache->news&(1<<i)) {
+                int n = -1;
+                if(cache->neoncache[i].v && 
+                  ((cache->neoncache[i].t==NEON_CACHE_XMMR) || (cache->neoncache[i].t==NEON_CACHE_XMMW)))
+                    n = cache->neoncache[i].n;
+                if(cache->neoncache[i].v && 
+                  ((cache->neoncache[i].t==NEON_CACHE_YMMR) || (cache->neoncache[i].t==NEON_CACHE_YMMW)))
+                    n = cache->neoncache[i].n + 16;
+                if(n==-1 || !((preload>>n)&1))  // keep preloaded regs
+                    cache->neoncache[i].v = 0;
+            }
         cache->news = 0;
     }
     if(cache->stack_push) {
@@ -638,7 +646,7 @@ void neoncacheUnwind(neoncache_t* cache)
             }
         cache->xmm_write = cache->xmm_removed = 0;
     }
-        // add back removed YMM
+    // add back removed YMM
     if(cache->ymm_removed) {
         for(int i=0; i<16; ++i)
             if(cache->ymm_removed&(1<<i)) {
@@ -767,8 +775,8 @@ void inst_name_pass3(dynarec_native_t* dyn, int ninst, const char* name, rex_t r
         return;
     }
 
-    static char buf[4096];
-    int length = sprintf(buf, "barrier=%d state=%d/%s(%s->%s)/%c, set=%X/%X, use=%X, need=%X/%X, sm=%d(%d/%d/%d)",
+    static char buf[8192];
+    int length = sprintf(buf, "barrier=%d state=%d/%s(%s->%s)/%c, set=%X/%X, use=%X, need=%X/%X, sm=%d(%d/%d/%d)%d",
         dyn->insts[ninst].x64.barrier,
         dyn->insts[ninst].x64.state_flags,
         df_status[dyn->f],
@@ -780,7 +788,11 @@ void inst_name_pass3(dynarec_native_t* dyn, int ninst, const char* name, rex_t r
         dyn->insts[ninst].x64.use_flags,
         dyn->insts[ninst].x64.need_before,
         dyn->insts[ninst].x64.need_after,
-        dyn->smwrite, dyn->insts[ninst].will_write, dyn->insts[ninst].last_write, dyn->insts[ninst].lock);
+        dyn->smwrite, dyn->insts[ninst].will_write, dyn->insts[ninst].last_write, dyn->insts[ninst].lock, 
+        dyn->insts[ninst].x64.strongmem);
+    if(dyn->insts[ninst].use_lrcpc || dyn->insts[ninst].has_lrcpc) {
+        length += sprintf(buf + length, " LRCPC:%d/%d", dyn->insts[ninst].use_lrcpc, dyn->insts[ninst].has_lrcpc);
+    }
     if (dyn->insts[ninst].nat_flags_op) {
         if (dyn->insts[ninst].nat_flags_op == NAT_FLAG_OP_TOUCH && dyn->insts[ninst].before_nat_flags)
             length += sprintf(buf + length, " NF:%d/read:%x", dyn->insts[ninst].nat_flags_op, dyn->insts[ninst].before_nat_flags);
@@ -860,7 +872,7 @@ void inst_name_pass3(dynarec_native_t* dyn, int ninst, const char* name, rex_t r
         length += sprintf(buf + length, " purgeYmm=%04x", dyn->insts[ninst].purge_ymm);
     }
     if (dyn->insts[ninst].preload_xmmymm) {
-        length += sprintf(buf + length, " preload=%x/%d", dyn->insts[ninst].preload_xmmymm, dyn->insts[ninst].preload_from);
+        length += sprintf(buf + length, " preload=%x(%x)/%d", dyn->insts[ninst].preload_xmmymm, dyn->insts[ninst].preloadw_xmmymm, dyn->insts[ninst].preload_from);
     }
     if (dyn->n.stack || dyn->insts[ninst].n.stack_next || dyn->insts[ninst].n.x87stack) {
         length += sprintf(buf + length, " X87:%d/%d(+%d/-%d)%d", dyn->n.stack, dyn->insts[ninst].n.stack_next, dyn->insts[ninst].n.stack_push, dyn->insts[ninst].n.stack_pop, dyn->insts[ninst].n.x87stack);
@@ -1190,7 +1202,7 @@ int nativeFlagsNeedsTransform(dynarec_arm_t* dyn, int ninst)
 void fpu_save_and_unwind(dynarec_arm_t* dyn, int ninst, neoncache_t* cache)
 {
     memcpy(cache, &dyn->insts[ninst].n, sizeof(neoncache_t));
-    neoncacheUnwind(&dyn->insts[ninst].n);
+    neoncacheUnwind(&dyn->insts[ninst].n, dyn->insts[ninst].preload_xmmymm);
 }
 void fpu_unwind_restore(dynarec_arm_t* dyn, int ninst, neoncache_t* cache)
 {
@@ -1510,6 +1522,11 @@ void updateYmm0s(dynarec_arm_t* dyn, int ninst, int max_ninst_reached)
 }
 
 
+void sse_mark_used(dynarec_arm_t* dyn, int ninst, int a)
+{
+    dyn->n.xmm_used |= 1<<a;
+}
+
 // AVX helpers
 void avx_mark_zero(dynarec_arm_t* dyn, int ninst, int reg)
 {
@@ -1556,6 +1573,8 @@ static int ymm_preload_reg(dynarec_arm_t* dyn, int ninst, int last, int ymm)
             (dyn->insts[ninst].n.neoncache[i].n==ymm
                 && (dyn->insts[ninst].n.neoncache[i].t==NEON_CACHE_YMMR || dyn->insts[ninst].n.neoncache[i].t==NEON_CACHE_YMMW))))
             i = -1; // nope
+        else if((i>=SCRATCH0) && dyn->insts[ninst].n.fpu_scratch && (i<SCRATCH0+dyn->insts[ninst].n.fpu_scratch))
+            i = -1; // need space for scratch regs
         else
             ++ninst;
     }
@@ -1569,53 +1588,87 @@ void addSSEPreload(dynarec_arm_t* dyn, int ninst, int i2, uint32_t preload)
     if(i2 && !dyn->insts[i2-1].x64.has_next)    // need a previous opcode to set the preload, unless it's the #0
         return;
     // check if there is jump out or outside this loop
+    int has_host_call = 0;
     for(int i=i2; i<ninst; ++i) {
         if(!dyn->insts[i].x64.has_next || (dyn->insts[i].x64.barrier&BARRIER_FLOAT))
             return;
         // for now, unneeded stop at first jump, so this should also stop there
         if(dyn->insts[i].x64.jmp/* && ((dyn->insts[i].x64.jmp_insts>ninst) || (dyn->insts[i].x64.jmp_insts<i2))*/)
             return;
+        if(dyn->insts[i].host_call_clobber)
+            return;
+        if(dyn->insts[i].host_call)
+            has_host_call = 1;
     }
     uint16_t ymm_mask = 0;
+    uint16_t ymm_preload = 0;
+    uint16_t xmm_mask = 0;
+    uint32_t preloadw_xmmymm = 0;
     for(int i=0; i<16; ++i) {
         if(preload&(1<<i)) {
             int v = xmm_preload_reg(dyn, i2?(i2-1):0, ninst, i);
-            // propagate until not needed
+            // check if it needs to be a writen reg
             int i3 = i2;
+            int w = 0;
+            while(i3<ninst && !w) {
+                if(dyn->insts[i3].n.xmm_used&(1<<i)) {
+                    if(dyn->insts[i3].n.ssecache[i].write)
+                    w = 1;
+                }
+                ++i3;
+            }
+            preloadw_xmmymm |= w<<i;
+            // propagate until not needed
+            i3 = i2;
             while(i3<ninst) {
-                if(dyn->insts[i3].n.xmm_used&(1<<i))
+                if(dyn->insts[i3].n.xmm_used&(1<<i) || (dyn->insts[i3].purge_ymm&(1<<i)))
                     i3 = ninst;
                 else {
-                    dyn->insts[i3].n.ssecache[i].write = 0;
+                    dyn->insts[i3].n.ssecache[i].write = w;
                     dyn->insts[i3].n.ssecache[i].reg = v;
-                    dyn->insts[i3].n.neoncache[v].t = NEON_CACHE_XMMR;
+                    dyn->insts[i3].n.neoncache[v].t = w?NEON_CACHE_XMMW:NEON_CACHE_XMMR;
                     dyn->insts[i3].n.neoncache[v].n = i;
+                    if (i3 == i2) xmm_mask |= 1 << i;
                     ++i3;
                 }
             }
         }
         if(preload&(1<<(16+i))) {
             int v = ymm_preload_reg(dyn, i2?(i2-1):0, ninst, i);
-            if(v!=-1) {
-                ymm_mask |= 1<<i;
-                // propagate until not needed
+            if (v != -1) {
+                ymm_preload |= 1 << i;
+                // check if it needs to be a writen reg
                 int i3 = i2;
+                int w = 0;
+                while(i3<ninst && !w) {
+                    if(dyn->insts[i3].n.ymm_used&(1<<i)) {
+                        if(dyn->insts[i3].n.neoncache[v].t == NEON_CACHE_YMMW)
+                            w = 1;
+                    }
+                    ++i3;
+                }
+                // propagate until not needed
+                i3 = i2;
                 while(i3<ninst) {
                     if(dyn->insts[i3].n.ymm_used&(1<<i))
                         i3 = ninst;
                     else {
-                        dyn->insts[i3].n.neoncache[v].t = NEON_CACHE_YMMR;
+                        dyn->insts[i3].n.neoncache[v].t = w?NEON_CACHE_YMMW:NEON_CACHE_YMMR;
                         dyn->insts[i3].n.neoncache[v].n = i;
+                        if (i3 == i2) ymm_mask |= 1 << i;
                         ++i3;
                     }
                 }
+                preloadw_xmmymm |= w<<(i+16);
             }
         }
     }
-    preload = (preload&0xffff) | (ymm_mask<<16);    // update ymm_mask
-    //TODO: should check native calls too?
+    preload = (preload & 0xffff) | (ymm_preload << 16); // update ymm_mask
     dyn->insts[i2].preload_xmmymm = preload;
+    dyn->insts[i2].purge_ymm &= ~ymm_preload; // don't purge preloaded regs
+    dyn->insts[i2].preloadw_xmmymm = preloadw_xmmymm;
     dyn->insts[i2].preload_from = ninst;
-    dyn->insts[i2].n.xmm_unneeded |= preload&0xffff;
+    dyn->insts[i2].preload_host_call = has_host_call;
+    dyn->insts[i2].n.xmm_unneeded |= xmm_mask;
     dyn->insts[i2].n.ymm_unneeded |= ymm_mask;
 }

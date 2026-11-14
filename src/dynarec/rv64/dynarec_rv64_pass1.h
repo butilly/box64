@@ -10,7 +10,7 @@
 #define NEW_INST                                          \
     dyn->insts[ninst].f_entry = dyn->f;                   \
     dyn->e.combined1 = dyn->e.combined2 = 0;              \
-    for (int i = 0; i < 16; ++i)                          \
+    for (int i = 0; i < 24; ++i)                          \
         dyn->e.olds[i].v = 0;                             \
     dyn->insts[ninst].vector_sew_entry = dyn->vector_sew; \
     dyn->inst_sew = dyn->vector_sew;                      \
@@ -20,9 +20,11 @@
     dyn->e.barrier = 0;                                   \
     AREFLAGSNEEDED()
 
-#define INST_EPILOG                    \
-    dyn->insts[ninst].e = dyn->e;      \
-    dyn->insts[ninst].f_exit = dyn->f; \
+#define INST_EPILOG                                                    \
+    dyn->vtype_restore = VECTOR_SEWNA;                                 \
+    if (dyn->insts[ninst].vec_used) sse_sync_all_cache_types(&dyn->e); \
+    dyn->insts[ninst].e = dyn->e;                                      \
+    dyn->insts[ninst].f_exit = dyn->f;                                 \
     dyn->insts[ninst].vector_sew_exit = dyn->vector_sew;
 
 #define INST_NAME(name)

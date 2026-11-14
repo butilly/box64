@@ -48,7 +48,6 @@ uintptr_t geted(dynarec_la64_t* dyn, uintptr_t addr, int ninst, uint8_t nextop, 
 
     if ((nextop & 7) == 4) {
         uint8_t sib = PK(0);
-        if ((sib & 7) == 4) MARK_LEAF_RSP(LEAF_RSP_REF);
         if (((sib & 7) != 5) || ((nextop & 0xC0) != 0)) UP32_READ(TO_NAT((sib & 7) + (rex.b << 3)));
         if ((((sib >> 3) & 7) + (rex.x << 3)) != 4) UP32_READ(TO_NAT(((sib >> 3) & 7) + (rex.x << 3)));
     } else if (((nextop & 7) != 5) || ((nextop & 0xC0) != 0)) {
@@ -379,7 +378,7 @@ void jump_to_epilog(dynarec_la64_t* dyn, uintptr_t ip, int reg, int ninst)
     TABLE64C(x2, const_epilog);
     SMEND();
     CHECK_DFNONE(0);
-    if (BOX64DRENV(dynarec_callret) >= 2)
+    if (BOX64DRENV(dynarec_callret) >= 3)
         doLeaveBlock(dyn, ninst, x4, x5, x6);
     BR(x2);
 }
@@ -401,7 +400,7 @@ void jump_to_epilog_fast(dynarec_la64_t* dyn, uintptr_t ip, int reg, int ninst)
     TABLE64C(x2, const_epilog_fast);
     SMEND();
     CHECK_DFNONE(0);
-    if (BOX64DRENV(dynarec_callret) >= 2)
+    if (BOX64DRENV(dynarec_callret) >= 3)
         doLeaveBlock(dyn, ninst, x4, x5, x6);
     BR(x2);
 }
@@ -415,7 +414,7 @@ void doEnterBlock(dynarec_la64_t* dyn, int ninst, int s1, int s2, int s3)
     LD_D(s1, s1, 0); // load the dynablock pointer
     ADDI_D(s1, s1, offsetof(dynablock_t, in_used));
     MOV32w(s3, 1);
-    AMADD_W(s2, s3, s1);
+    AMADD_DB_W(s2, s3, s1);
 }
 
 void doLeaveBlock(dynarec_la64_t* dyn, int ninst, int s1, int s2, int s3)
@@ -427,7 +426,7 @@ void doLeaveBlock(dynarec_la64_t* dyn, int ninst, int s1, int s2, int s3)
     LD_D(s1, s1, 0); // load the dynablock pointer
     ADDI_D(s1, s1, offsetof(dynablock_t, in_used));
     MOV32w(s3, -1);
-    AMADD_W(s2, s3, s1);
+    AMADD_DB_W(s2, s3, s1);
 }
 
 
@@ -489,7 +488,7 @@ void jump_to_next(dynarec_la64_t* dyn, uintptr_t ip, int reg, int ninst, int is3
     }
     CLEARIP();
     SMEND();
-    if (BOX64DRENV(dynarec_callret) >= 2 && !dyn->insts[ninst].x64.has_callret)
+    if (BOX64DRENV(dynarec_callret) >= 3 && !dyn->insts[ninst].x64.has_callret)
         doLeaveBlock(dyn, ninst, x4, x5, x6);
     // The JIRL(xRA, ...) form is only for gdb backtraces, but it breaks the
     // return-address-stack prediction on every block-to-block jump, which is
@@ -514,7 +513,7 @@ void ret_to_next(dynarec_la64_t* dyn, uintptr_t ip, int ninst, rex_t rex)
         LD_D(xRA, xSP, 0);    // native addr
         LD_D(x6, xSP, 8);     // x86 addr
         ADDI_D(xSP, xSP, 16); // pop
-        if (BOX64DRENV(dynarec_callret) >= 2)
+        if (BOX64DRENV(dynarec_callret) >= 3)
             doLeaveBlock(dyn, ninst, x4, x5, x7);
         BNE(x6, xRIP, 2 * 4); // is it the right address?
         BR(xRA);
@@ -1460,6 +1459,17 @@ static void mmx_reflectcache(dynarec_la64_t* dyn, int ninst, int s1)
 }
 
 // SSE / SSE2 helpers
+
+static void sse_save_entry_cache(dynarec_la64_t* dyn, int a)
+{
+    if (a < 0 || a >= 16) return;
+    int slot = dyn->lsx.avxcache[a].v != -1 ? dyn->lsx.avxcache[a].reg : (dyn->lsx.ssecache[a].v != -1 ? dyn->lsx.ssecache[a].reg : -1);
+    if (slot < 0 || slot >= 24) return;
+    if (dyn->lsx.olds[slot].v) return;
+    if (dyn->lsx.news & (1u << slot)) return;
+    dyn->lsx.olds[slot] = dyn->lsx.lsxcache[slot];
+}
+
 void sse_merge_all(dynarec_la64_t* dyn, int ninst)
 {
     for (int i = 0; i < 16; ++i)
@@ -1470,6 +1480,7 @@ void sse_merge_all(dynarec_la64_t* dyn, int ninst)
 int sse_get_reg(dynarec_la64_t* dyn, int ninst, int s1, int a, int forwrite)
 {
     dyn->lsx.xmm_used |= 1 << a;
+    sse_save_entry_cache(dyn, a);
     if (dyn->lsx.ssecache[a].v != -1) {
         xmm_scalar_merge(dyn, ninst, a);
         if (forwrite) {
@@ -1491,6 +1502,7 @@ int sse_get_reg_scalar(dynarec_la64_t* dyn, int ninst, int s1, int a, int forwri
 {
     MAYUSE(forwrite);
     dyn->lsx.xmm_used |= 1 << a;
+    sse_save_entry_cache(dyn, a);
     if (dyn->lsx.scalarcache[a] != -1) {
         int reg = dyn->lsx.scalarcache[a];
         if (dyn->lsx.lsxcache[reg].t == (kind == XMM_SCALAR_SS ? LSX_CACHE_XMM_S : LSX_CACHE_XMM_D)) return reg;
@@ -1516,6 +1528,7 @@ int sse_get_reg_scalar(dynarec_la64_t* dyn, int ninst, int s1, int a, int forwri
 int sse_get_reg_empty(dynarec_la64_t* dyn, int ninst, int s1, int a)
 {
     dyn->lsx.xmm_used |= 1 << a;
+    sse_save_entry_cache(dyn, a);
     if (dyn->lsx.ssecache[a].v != -1) {
         xmm_scalar_discard(dyn, a);
         dyn->lsx.ssecache[a].write = 1;
@@ -1535,6 +1548,7 @@ int sse_get_reg_empty(dynarec_la64_t* dyn, int ninst, int s1, int a)
 void sse_forget_reg(dynarec_la64_t* dyn, int ninst, int a)
 {
     dyn->lsx.xmm_used |= 1 << a;
+    sse_save_entry_cache(dyn, a);
     if (dyn->lsx.ssecache[a].v == -1)
         return;
     xmm_scalar_merge(dyn, ninst, a);
@@ -1632,6 +1646,7 @@ static void sse_reflectcache(dynarec_la64_t* dyn, int ninst, int s1)
 int avx_get_reg(dynarec_la64_t* dyn, int ninst, int s1, int a, int forwrite, int width)
 {
     dyn->lsx.ymm_used |= 1 << a;
+    sse_save_entry_cache(dyn, a);
     if (width == LSX_AVX_WIDTH_256) {
         ymm_live_read(dyn, ninst, a);
         if (forwrite) ymm_live_write(dyn, ninst, a);
@@ -1672,6 +1687,7 @@ int avx_get_reg(dynarec_la64_t* dyn, int ninst, int s1, int a, int forwrite, int
 int avx_get_reg_empty(dynarec_la64_t* dyn, int ninst, int s1, int a, int width)
 {
     dyn->lsx.ymm_used |= 1 << a;
+    sse_save_entry_cache(dyn, a);
     if (width == LSX_AVX_WIDTH_128)
         ymm_live_zero(dyn, ninst, a);
     else
@@ -1697,6 +1713,7 @@ int avx_get_reg_empty(dynarec_la64_t* dyn, int ninst, int s1, int a, int width)
 void avx_reflect_reg_upper128(dynarec_la64_t* dyn, int ninst, int a, int forwrite)
 {
     dyn->lsx.ymm_used |= 1 << a;
+    sse_save_entry_cache(dyn, a);
     if (dyn->lsx.avxcache[a].v == -1 || forwrite == 0)
         return;
     if (dyn->lsx.lsxcache[dyn->lsx.avxcache[a].reg].t == LSX_CACHE_YMMW) {
@@ -1714,6 +1731,7 @@ void avx_reflect_reg_upper128(dynarec_la64_t* dyn, int ninst, int a, int forwrit
 void avx_forget_reg(dynarec_la64_t* dyn, int ninst, int a)
 {
     dyn->lsx.ymm_used |= 1 << a;
+    sse_save_entry_cache(dyn, a);
     if (dyn->lsx.avxcache[a].v == -1)
         return;
     if (dyn->lsx.lsxcache[dyn->lsx.avxcache[a].reg].t == LSX_CACHE_YMMW) {
@@ -1733,6 +1751,7 @@ void avx_forget_reg(dynarec_la64_t* dyn, int ninst, int a)
 void avx_reflect_reg(dynarec_la64_t* dyn, int ninst, int a)
 {
     dyn->lsx.ymm_used |= 1 << a;
+    sse_save_entry_cache(dyn, a);
     if (dyn->lsx.avxcache[a].v == -1)
         return;
     if (dyn->lsx.lsxcache[dyn->lsx.avxcache[a].reg].t == LSX_CACHE_YMMW) {
@@ -1989,6 +2008,7 @@ void fpu_propagate_stack(dynarec_la64_t* dyn, int ninst)
     }
     dyn->lsx.stack = dyn->lsx.stack_next;
     dyn->lsx.news = 0;
+    for (int i = 0; i < 24; ++i) dyn->lsx.olds[i].v = 0;
     dyn->lsx.stack_push = 0;
     dyn->lsx.swapped = 0;
 }
@@ -2431,9 +2451,9 @@ static void fpuCacheTransform(dynarec_la64_t* dyn, int ninst, int s1, int s2, in
             }
         }
     }
-    if (stack_cnt != cache_i2.stack) {
-        MESSAGE(LOG_DUMP, "\t    - adjust stack count %d -> %d -\n", stack_cnt, cache_i2.stack);
-        int a = stack_cnt - cache_i2.stack;
+    if (stack_cnt != cache_i2.stack || dyn->lsx.x87stack != cache_i2.x87stack) {
+        MESSAGE(LOG_DUMP, "\t    - adjust stack count %d -> %d / pending %d -> %d -\n", stack_cnt, cache_i2.stack, dyn->lsx.x87stack, cache_i2.x87stack);
+        int a = dyn->lsx.x87stack - cache_i2.x87stack;
         // Add x87stack to emu fpu_stack
         LD_W(s3, xEmu, offsetof(x64emu_t, fpu_stack));
         ADDI_D(s3, s3, a);
@@ -2551,18 +2571,20 @@ void doPreload(dynarec_la64_t* dyn, int ninst)
     MESSAGE(LOG_INFO, "Preload XMM/YMM -------- %x\n", preload);
     for (int i = 0; i < 16; ++i) {
         if (preload & (1u << i)) {
+            int t = dyn->insts[ninst].lsx.lsxcache[i].t == LSX_CACHE_XMMW ? LSX_CACHE_XMMW : LSX_CACHE_XMMR;
             dyn->lsx.avxcache[i].v = -1;
-            dyn->lsx.ssecache[i].reg = fpu_get_reg_xmm(dyn, LSX_CACHE_XMMR, i);
-            dyn->lsx.ssecache[i].write = 0;
+            dyn->lsx.ssecache[i].reg = fpu_get_reg_xmm(dyn, t, i);
+            dyn->lsx.ssecache[i].write = (t == LSX_CACHE_XMMW);
             if (!dyn->lsx.ssecache[i].v) dyn->lsx.ssecache[i].write = 1;
             VLD(dyn->lsx.ssecache[i].reg, xEmu, offsetof(x64emu_t, xmm[i]));
         }
         if (preload & (1u << (16 + i))) {
+            int t = dyn->insts[ninst].lsx.lsxcache[i].t == LSX_CACHE_YMMW ? LSX_CACHE_YMMW : LSX_CACHE_YMMR;
             dyn->lsx.ssecache[i].v = -1;
             dyn->lsx.avxcache[i].v = 0;
-            dyn->lsx.avxcache[i].reg = fpu_get_reg_ymm(dyn, LSX_CACHE_YMMR, i);
+            dyn->lsx.avxcache[i].reg = fpu_get_reg_ymm(dyn, t, i);
             dyn->lsx.avxcache[i].upper_zero_pending = 0;
-            dyn->lsx.avxcache[i].write = 0;
+            dyn->lsx.avxcache[i].write = (t == LSX_CACHE_YMMW);
             if (!dyn->lsx.avxcache[i].v) dyn->lsx.avxcache[i].write = 1;
             VLD(dyn->lsx.avxcache[i].reg, xEmu, offsetof(x64emu_t, xmm[i]));
             VLD(SCRATCH, xEmu, offsetof(x64emu_t, ymm[i]));

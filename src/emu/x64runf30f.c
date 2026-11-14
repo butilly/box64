@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-#define _GNU_SOURCE
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -109,16 +108,16 @@ uintptr_t RunF30F(x64emu_t *emu, rex_t rex, uintptr_t addr, int* step)
         break;
     case 0x2C:  /* CVTTSS2SI Gd, Ex */
         nextop = F8;
-        GETEX(0);
+        GETEX4(0);
         GETGD;
         if (rex.w) {
-            if(isnanf(EX->f[0]) || isinff(EX->f[0]) || EX->f[0]>=(float)0x7fffffffffffffffLL) {
+            if(isnan(EX->f[0]) || isinf(EX->f[0]) || EX->f[0]>=(float)0x7fffffffffffffffLL) {
                 mxcsr_raise_invalid(emu);
                 GD->q[0] = 0x8000000000000000LL;
             } else
                 GD->sq[0] = EX->f[0];
         } else {
-            if(isnanf(EX->f[0]) || isinff(EX->f[0]) || EX->f[0]>=(float)0x7fffffff) {
+            if(isnan(EX->f[0]) || isinf(EX->f[0]) || EX->f[0]>=(float)0x7fffffff) {
                 mxcsr_raise_invalid(emu);
                 GD->dword[0] = 0x80000000;
             } else
@@ -128,10 +127,10 @@ uintptr_t RunF30F(x64emu_t *emu, rex_t rex, uintptr_t addr, int* step)
         break;
     case 0x2D:  /* CVTSS2SI Gd, Ex */
         nextop = F8;
-        GETEX(0);
+        GETEX4(0);
         GETGD;
         if(rex.w) {
-            if(isnanf(EX->f[0]) || isinff(EX->f[0]) || EX->f[0]>=(float)0x7fffffffffffffffLL) {
+            if(isnan(EX->f[0]) || isinf(EX->f[0]) || EX->f[0]>=(float)0x7fffffffffffffffLL) {
                 mxcsr_raise_invalid(emu);
                 GD->q[0] = 0x8000000000000000LL;
             } else
@@ -154,7 +153,7 @@ uintptr_t RunF30F(x64emu_t *emu, rex_t rex, uintptr_t addr, int* step)
                         break;
                 }
         } else {
-            if(isnanf(EX->f[0]))
+            if(isnan(EX->f[0]))
                 tmp64s = INT32_MIN;
             else
                 switch(emu->mxcsr.f.MXCSR_RC) {
@@ -236,7 +235,7 @@ uintptr_t RunF30F(x64emu_t *emu, rex_t rex, uintptr_t addr, int* step)
         GETGX;
         if (EX->f[0]<0)
             GX->f[0] = -NAN;
-        else if (isnanf(EX->f[0]))
+        else if (isnan(EX->f[0]))
             GX->ud[0] = EX->ud[0] | 0x00400000;
         else{
             int oldround = mxcsr_setround(emu);
@@ -263,43 +262,43 @@ uintptr_t RunF30F(x64emu_t *emu, rex_t rex, uintptr_t addr, int* step)
         nextop = F8;
         GETEX(0);
         GETGX;
-        if(isnanf(EX->f[0])) GX->ud[0] = EX->ud[0] | 0x00400000;
-        else { GX->f[0] = 1.0f/EX->f[0]; if(isnanf(GX->f[0])) GX->ud[0] |= 0x80000000; }
+        if(isnan(EX->f[0])) GX->ud[0] = EX->ud[0] | 0x00400000;
+        else { GX->f[0] = 1.0f/EX->f[0]; if(isnan(GX->f[0])) GX->ud[0] |= 0x80000000; }
         break;
 
     case 0x58:  /* ADDSS Gx, Ex */
         nextop = F8;
         GETEX(0);
         GETGX;
-        if(isnanf(GX->f[0])) GX->ud[0] |= 0x00400000;
-        else if(isnanf(EX->f[0])) GX->ud[0] = EX->ud[0] | 0x00400000;
+        if(isnan(GX->f[0])) GX->ud[0] |= 0x00400000;
+        else if(isnan(EX->f[0])) GX->ud[0] = EX->ud[0] | 0x00400000;
         else {
             int oldround = mxcsr_setround(emu);
             GX->f[0] += EX->f[0];
             fesetround(oldround);
 
-            if(isnanf(GX->f[0]))
+            if(isnan(GX->f[0]))
                 GX->ud[0] |= 0x80000000;
         }
         break;
     case 0x59:  /* MULSS Gx, Ex */
         nextop = F8;
-        GETEX(0);
+        GETEX4(0);
         GETGX;
-        if(isnanf(GX->f[0])) GX->ud[0] |= 0x00400000;
-        else if(isnanf(EX->f[0])) GX->ud[0] = EX->ud[0] | 0x00400000;
+        if(isnan(GX->f[0])) GX->ud[0] |= 0x00400000;
+        else if(isnan(EX->f[0])) GX->ud[0] = EX->ud[0] | 0x00400000;
         else {
             int oldround = mxcsr_setround(emu);
             GX->f[0] *= EX->f[0];
             fesetround(oldround);
-            if(isnanf(GX->f[0])) GX->ud[0] |= 0x80000000; }
+            if(isnan(GX->f[0])) GX->ud[0] |= 0x80000000; }
         break;
     case 0x5A:  /* CVTSS2SD Gx, Ex */
         nextop = F8;
-        GETEX(0);
+        GETEX4(0);
         GETGX;
         #ifdef RV64
-        if(isnanf(EX->f[0]))
+        if(isnan(EX->f[0]))
             GX->q[0] = ((uint64_t)(EX->ud[0] & 0x80000000) << 32)
                      | ((uint64_t)(EX->ud[0] & 0x007fffff) << 29)
                      | 0x7ff8000000000000ULL;
@@ -314,7 +313,7 @@ uintptr_t RunF30F(x64emu_t *emu, rex_t rex, uintptr_t addr, int* step)
         GETEX(0);
         GETGX;
         for(int i=0; i<4; ++i) {
-            if(isnanf(EX->f[i]))
+            if(isnan(EX->f[i]))
                 tmp64s = INT32_MIN;
             else
                 tmp64s = EX->f[i];
@@ -328,38 +327,38 @@ uintptr_t RunF30F(x64emu_t *emu, rex_t rex, uintptr_t addr, int* step)
         break;
     case 0x5C:  /* SUBSS Gx, Ex */
         nextop = F8;
-        GETEX(0);
+        GETEX4(0);
         GETGX;
-        if(isnanf(GX->f[0])) GX->ud[0] |= 0x00400000;
-        else if(isnanf(EX->f[0])) GX->ud[0] = EX->ud[0] | 0x00400000;
+        if(isnan(GX->f[0])) GX->ud[0] |= 0x00400000;
+        else if(isnan(EX->f[0])) GX->ud[0] = EX->ud[0] | 0x00400000;
         else {
             int oldround = mxcsr_setround(emu);
             GX->f[0] -= EX->f[0];
             fesetround(oldround);
-            if(isnanf(GX->f[0])) GX->ud[0] |= 0x80000000; }
+            if(isnan(GX->f[0])) GX->ud[0] |= 0x80000000; }
         break;
     case 0x5D:  /* MINSS Gx, Ex */
         nextop = F8;
-        GETEX(0);
+        GETEX4(0);
         GETGX;
         if(isnan(GX->f[0]) || isnan(EX->f[0]) || islessequal(EX->f[0], GX->f[0]))
             GX->f[0] = EX->f[0];
         break;
     case 0x5E:  /* DIVSS Gx, Ex */
         nextop = F8;
-        GETEX(0);
+        GETEX4(0);
         GETGX;
-        if(isnanf(GX->f[0])) GX->ud[0] |= 0x00400000;
-        else if(isnanf(EX->f[0])) GX->ud[0] = EX->ud[0] | 0x00400000;
+        if(isnan(GX->f[0])) GX->ud[0] |= 0x00400000;
+        else if(isnan(EX->f[0])) GX->ud[0] = EX->ud[0] | 0x00400000;
         else {
             int oldround = mxcsr_setround(emu);
             GX->f[0] /= EX->f[0];
             fesetround(oldround);
-            if(isnanf(GX->f[0])) GX->ud[0] |= 0x80000000; }
+            if(isnan(GX->f[0])) GX->ud[0] |= 0x80000000; }
         break;
     case 0x5F:  /* MAXSS Gx, Ex */
         nextop = F8;
-        GETEX(0);
+        GETEX4(0);
         GETGX;
         if (isnan(GX->f[0]) || isnan(EX->f[0]) || isgreaterequal(EX->f[0], GX->f[0]))
             GX->f[0] = EX->f[0];
@@ -552,19 +551,20 @@ uintptr_t RunF30F(x64emu_t *emu, rex_t rex, uintptr_t addr, int* step)
         GX->ud[0]=(tmp8s)?0xffffffff:0;
         break;
 
-    case 0xC7:  
-        CHECK_FLAGS(emu);
+    case 0xC7:
         nextop = F8;
-        GETE8xw(0);
+        tmp8u = nextop >> 3;
         switch(tmp8u&7) {
-            case 6: /* RDPID Ed */
+            case 7: /* RDPID Ed */
+                if (!MODREG) {
+                    return 0;
+                }
+                GETED(0);
                 ED->q[0] = helper_getcpu(emu);
-                SET_FLAG(F_CF);
                 break;
             default:
                 return 0;
         }
-        GX->ud[0]=(tmp8s)?0xffffffff:0;
         break;
 
         case 0xD6:  /* MOVQ2DQ Gx, Em */

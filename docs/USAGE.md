@@ -80,7 +80,7 @@ Optimize CALL/RET opcodes. Available in WowBox64.
  * 0: Do not optimize CALL/RET, use jump table.
  * 1: Try to optimize CALL/RET, skipping the jump table when possible.
  * 2: Try to optimize CALL/RET, skipping the jump table when possible, adding code to handle return to dirty/modified block. Does not work on WowBox64. [Default]
- * 3: Same as 2, with leaf call analysis that tries to duplicate leaf bodies into their callers. Only available for LoongArch for now.
+ * 3: Same as 2, but also track dynablock usage so blocks are not reclaimed while still in use.
 
 ### BOX64_DYNAREC_DF
 
@@ -321,10 +321,10 @@ Enable or disable the generation of division-by-zero exception. Available in Wow
 
 ### BOX64_DYNAREC_TBB
 
-Enable or disable libtbb detection.
+Detect oneTBB (statically linked or libtbb) and emulate x86 TSO for its scheduler code range.
 
- * 0: Do not detect libtbb.
- * 1: Detect libtbb and apply conservative settings. [Default]
+ * 0: Do not detect oneTBB.
+ * 1: Detect oneTBB and apply strongmem=4 to its scheduler code range. [Default]
 
 ### BOX64_DYNAREC_X87DOUBLE
 

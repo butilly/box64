@@ -40,6 +40,9 @@
 #ifndef FEMIT
 #define FEMIT(A)    EMIT(A)
 #endif
+#ifndef LEMIT
+#define LEMIT(A)    EMIT(A)
+#endif
 #ifndef ENDPREFIX
 #define ENDPREFIX
 #endif
@@ -575,15 +578,36 @@
 #define ALIGNED_ATOMICxw ((fixedaddress && !(fixedaddress&(((1<<(2+rex.w))-1)))) || BOX64ENV(dynarec_aligned_atomics))
 #define ALIGNED_ATOMICH ((fixedaddress && !(fixedaddress&1)) || BOX64ENV(dynarec_aligned_atomics))
 
-// CALL will use x7 for the call address. Return value can be put in ret (unless ret is -1)
+// CALL will use xLR for the call address. Return value can be put in ret (unless ret is -1)
 // R0 will not be pushed/popd if ret is -2
-#define CALL(F, ret) call_c(dyn, ninst, F, x87pc, ret, 1, 0)
-// CALL_ will use x7 for the call address. Return value can be put in ret (unless ret is -1)
+#define CALL(F, ret) call_c(dyn, ninst, F, xLR, ret, 1, 0)
+// CALL_ will use xLR for the call address. Return value can be put in ret (unless ret is -1)
 // R0 will not be pushed/popd if ret is -2
-#define CALL_(F, ret, reg) call_c(dyn, ninst, F, x87pc, ret, 1, reg)
-// CALL_S will use x7 for the call address. Return value can be put in ret (unless ret is -1)
+#define CALL_(F, ret, reg) call_c(dyn, ninst, F, xLR, ret, 1, reg)
+// CALL_S will use xLR for the call address. Return value can be put in ret (unless ret is -1)
 // R0 will not be pushed/popd if ret is -2. Flags are not save/restored
-#define CALL_S(F, ret) call_c(dyn, ninst, F, x87pc, ret, 0, 0)
+#ifdef BOX64EC
+// a privileged instruction traps, so the guest exception gets the native context
+#define CALL_S(F, ret) do {                                                \
+    if ((F) == const_native_priv) UDF(0);                                  \
+    else call_c(dyn, ninst, F, xLR, ret, 0, 0);                            \
+} while (0)
+#else
+#define CALL_S(F, ret) call_c(dyn, ninst, F, xLR, ret, 0, 0)
+#endif
+// FPCR rounding follows emu->mxcsr while x64 code runs on ARM64EC: redo it each time the guest loads MXCSR
+#ifdef BOX64EC
+#define SYNC_FPCR_ROUND(s1, s2) do {                                       \
+    LDRw_U12(s1, xEmu, offsetof(x64emu_t, mxcsr));                         \
+    RBITw(s1, s1);              /* round is on bits 13-14 on x64, */       \
+    LSRw(s1, s1, 17);           /* but we want the reverse of that */      \
+    MRS_fpcr(s2);                                                          \
+    BFIx(s2, s1, 22, 2);                                                   \
+    MSR_fpcr(s2);                                                          \
+} while (0)
+#else
+#define SYNC_FPCR_ROUND(s1, s2)
+#endif
 // CALL_D will use x7 for the call address. Use for function having 1 or 2 double args and returning 1 double
 // All regs are saved, including xmm0-7, will move arg1/arg2 to D0, D1, return D0 to ret (unless any is -1)
 #define CALL_D(F, ret, arg1, arg2, sav1, sav2) call_d(dyn, ninst, F, ret, arg1, arg2, sav1, sav2)
@@ -601,6 +625,26 @@
 #define MARKSEG     dyn->insts[ninst].markseg = dyn->native_size
 #define GETMARKSEG  dyn->insts[ninst].markseg
 #define MARKLOCK    dyn->insts[ninst].marklock = dyn->native_size
+#ifdef BOX64EC
+// x6 is guest R9 and x87pc is x5, so keep the flags in the emu across the retry loop
+#define MARKLOCK_SAVE_FLAGS() do {                                           \
+    STRx_U12(xFlags, xEmu, offsetof(x64emu_t, eflags));                      \
+    MRS_nzcv(x4);                                                            \
+    STRx_U12(x4, xEmu, offsetof(x64emu_t, scratch[0]));                      \
+    MARKLOCK;                                                                \
+    LDRx_U12(xFlags, xEmu, offsetof(x64emu_t, eflags));                      \
+    LDRx_U12(x4, xEmu, offsetof(x64emu_t, scratch[0]));                      \
+    MSR_nzcv(x4);                                                            \
+} while (0)
+#else
+#define MARKLOCK_SAVE_FLAGS() do {                                           \
+    MOVx_REG(x6, xFlags);                                                    \
+    MRS_nzcv(x87pc);                                                         \
+    MARKLOCK;                                                                \
+    MOVx_REG(xFlags, x6);                                                    \
+    MSR_nzcv(x87pc);                                                         \
+} while (0)
+#endif
 #define GETMARKLOCK dyn->insts[ninst].marklock
 
 // Branch to MARK if cond (use j64)
@@ -861,11 +905,22 @@
 #endif
 
 #ifndef X87_ARITH_NAN_END_D
-#define X87_ARITH_NAN_END_D(vres, tmp, tmp2) \
+#define X87_ARITH_NAN_END_D(vres, vb, tmp, tmp2) \
     FCMEQD(tmp2, vres, vres);                \
-    VBIC(tmp, tmp, tmp2);                    \
-    VSHLQ_64(tmp, tmp, 63);                  \
-    VORR(vres, vres, tmp)
+    VBIC(tmp2, tmp, tmp2);                   \
+    VSHLQ_64(tmp2, tmp2, 63);                \
+    VORR(vres, vres, tmp2);                  \
+    VSSHRQ_64(tmp2, vres, 63);               \
+    FCMEQD(tmp, vres, vres);                 \
+    VMVNQ(tmp, tmp);                         \
+    VANDQ(tmp, tmp, tmp2);                   \
+    VSSHRQ_64(tmp2, vb, 63);                 \
+    VMVNQ(tmp2, tmp2);                       \
+    VANDQ(tmp, tmp, tmp2);                   \
+    FCMEQD(tmp2, vb, vb);                    \
+    VMVNQ(tmp2, tmp2);                       \
+    VANDQ(tmp, tmp, tmp2);                   \
+    VBIT(vres, vb, tmp)
 #endif
 
 #ifndef X87_ARITH_NAN_START_S
@@ -875,11 +930,22 @@
 #endif
 
 #ifndef X87_ARITH_NAN_END_S
-#define X87_ARITH_NAN_END_S(vres, tmp, tmp2) \
+#define X87_ARITH_NAN_END_S(vres, vb, tmp, tmp2) \
     FCMEQS(tmp2, vres, vres);                \
-    VBIC(tmp, tmp, tmp2);                    \
-    VSHL_32(tmp, tmp, 31);                   \
-    VORR(vres, vres, tmp)
+    VBIC(tmp2, tmp, tmp2);                   \
+    VSHL_32(tmp2, tmp2, 31);                 \
+    VORR(vres, vres, tmp2);                  \
+    VSSHR_32(tmp2, vres, 31);                \
+    FCMEQS(tmp, vres, vres);                 \
+    VMVNQ(tmp, tmp);                         \
+    VANDQ(tmp, tmp, tmp2);                   \
+    VSSHR_32(tmp2, vb, 31);                  \
+    VMVNQ(tmp2, tmp2);                       \
+    VANDQ(tmp, tmp, tmp2);                   \
+    FCMEQS(tmp2, vb, vb);                    \
+    VMVNQ(tmp2, tmp2);                       \
+    VANDQ(tmp, tmp, tmp2);                   \
+    VBIT(vres, vb, tmp)
 #endif
 
 #define STORE_REG(A)    STRx_U12(x##A, xEmu, offsetof(x64emu_t, regs[_##A]))
@@ -1004,8 +1070,8 @@
 #define READFLAGS(A) \
     if((A)!=X_PEND                                          \
     && (dyn->f==status_unk)) {                              \
-        TABLE64C(x6, const_updateflags_arm64);              \
-        BLR(x6);                                            \
+        TABLE64C(x5, const_updateflags_arm64);              \
+        BLR(x5);                                            \
         dyn->f = status_none;                               \
     } else if((A)==X_ALL) flushNative(dyn, ninst);
 #endif
@@ -1013,8 +1079,8 @@
 #define GRABFLAGS(A) \
     if((A)!=X_PEND                                          \
     && ((dyn->f==status_unk) || (dyn->f==status_set))) {    \
-        TABLE64C(x6, const_updateflags_arm64);              \
-        BLR(x6);                                            \
+        TABLE64C(x5, const_updateflags_arm64);              \
+        BLR(x5);                                            \
         dyn->f = status_none;                               \
     }
 
@@ -1371,12 +1437,12 @@ void emit_cmp32(dynarec_arm_t* dyn, int ninst, rex_t rex, int s1, int s2, int s3
 void emit_cmp8_0(dynarec_arm_t* dyn, int ninst, int s1, int s3, int s4);
 void emit_cmp16_0(dynarec_arm_t* dyn, int ninst, int s1, int s3, int s4);
 void emit_cmp32_0(dynarec_arm_t* dyn, int ninst, rex_t rex, int s1, int s3, int s4);
-void emit_test8(dynarec_arm_t* dyn, int ninst, int s1, int s2, int s3, int s4, int s5);
-void emit_test8c(dynarec_arm_t* dyn, int ninst, int s1, uint32_t c, int s3, int s4, int s5);
-void emit_test16(dynarec_arm_t* dyn, int ninst, int s1, int s2, int s3, int s4, int s5);
-void emit_test16c(dynarec_arm_t* dyn, int ninst, int s1, uint32_t c, int s3, int s4, int s5);
-void emit_test32(dynarec_arm_t* dyn, int ninst, rex_t rex, int s1, int s2, int s3, int s4, int s5);
-void emit_test32c(dynarec_arm_t* dyn, int ninst, rex_t rex, int s1, int64_t c, int s3, int s4, int s5);
+void emit_test8(dynarec_arm_t* dyn, int ninst, int s1, int s2, int s3, int s4);
+void emit_test8c(dynarec_arm_t* dyn, int ninst, int s1, uint32_t c, int s3, int s4);
+void emit_test16(dynarec_arm_t* dyn, int ninst, int s1, int s2, int s3, int s4);
+void emit_test16c(dynarec_arm_t* dyn, int ninst, int s1, uint32_t c, int s3, int s4);
+void emit_test32(dynarec_arm_t* dyn, int ninst, rex_t rex, int s1, int s2, int s3, int s4);
+void emit_test32c(dynarec_arm_t* dyn, int ninst, rex_t rex, int s1, int64_t c, int s3, int s4);
 void emit_add32(dynarec_arm_t* dyn, int ninst, rex_t rex, int s1, int s2, int s3, int s4);
 void emit_add32c(dynarec_arm_t* dyn, int ninst, rex_t rex, int s1, int64_t c, int s3, int s4, int s5);
 void emit_add8(dynarec_arm_t* dyn, int ninst, int s1, int s2, int s3, int s4);
@@ -1458,8 +1524,8 @@ void emit_rcl16c(dynarec_arm_t* dyn, int ninst, int s1, uint32_t c, int s3, int 
 void emit_rcr16c(dynarec_arm_t* dyn, int ninst, int s1, uint32_t c, int s3, int s4);
 void emit_rcl32c(dynarec_arm_t* dyn, int ninst, rex_t rex, int s1, uint32_t c, int s3, int s4);
 void emit_rcr32c(dynarec_arm_t* dyn, int ninst, rex_t rex, int s1, uint32_t c, int s3, int s4);
-void emit_rcl32(dynarec_arm_t* dyn, int ninst, rex_t rex, int s1, int s2, int s3, int s4, int s5);
-void emit_rcr32(dynarec_arm_t* dyn, int ninst, rex_t rex, int s1, int s2, int s3, int s4, int s5);
+void emit_rcl32(dynarec_arm_t* dyn, int ninst, rex_t rex, int s1, int s2, int s3, int s4);
+void emit_rcr32(dynarec_arm_t* dyn, int ninst, rex_t rex, int s1, int s2, int s3, int s4);
 void emit_shrd32c(dynarec_arm_t* dyn, int ninst, rex_t rex, int s1, int s2, uint32_t c, int s3, int s4);
 void emit_shld32c(dynarec_arm_t* dyn, int ninst, rex_t rex, int s1, int s2, uint32_t c, int s3, int s4);
 void emit_shrd32(dynarec_arm_t* dyn, int ninst, rex_t rex, int s1, int s2, int s5, int s3, int s4);

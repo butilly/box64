@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // __USE_UNIX98 is needed for sttype / gettype definition
 #define __USE_UNIX98
-#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
@@ -43,7 +42,7 @@
 typedef void (*vFppp_t)(void*, void*, void*);
 typedef void (*vFpi_t)(void*, int);
 typedef int  (*iFv_t)(void);
-typedef int  (*iFLi_t)(unsigned long, int);
+typedef int  (*iFLi_t)(pthread_t, int);
 //starting with glibc 2.34+, those 2 functions are in libc.so as versioned symbol only
 // So use dlsym to get the symbol unversioned, as simple link will not work.
 static vFppp_t real_pthread_cleanup_push_defer = NULL;
@@ -273,7 +272,7 @@ void* my32_prepare_thread(x64emu_t *emu, void* f, void* arg, int ssize, void** p
 {
     int stacksize = (ssize)?ssize:(2*1024*1024);    //default stack size is 2Mo
     //void* stack = malloc(stacksize);
-    void* stack = mmap64(NULL, stacksize, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_32BIT, -1, 0);
+    void* stack = mmap(NULL, stacksize, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_32BIT, -1, 0);
     if(stack==MAP_FAILED)
         return NULL;
     emuthread_t *et = (emuthread_t*)box_calloc(1, sizeof(emuthread_t));
@@ -693,8 +692,8 @@ EXPORT int my32_pthread_attr_init(x64emu_t* emu, void* attr)
 EXPORT int my32_pthread_getattr_np(x64emu_t* emu, uintptr_t th, void* attr)
 {
     (void)emu;
-    int ret = pthread_getattr_np(th, get_attr(attr));
-    if(!ret && th==pthread_self()) {
+    int ret = pthread_getattr_np((pthread_t) th, get_attr(attr));
+    if(!ret && (pthread_t) th == pthread_self()) {
         if(!emu->context->stacksizes) {
             emu->context->stacksizes = kh_init(threadstack);
         }

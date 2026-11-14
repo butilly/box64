@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-#define _GNU_SOURCE /* See feature_test_macros(7) */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -400,6 +399,32 @@ reg64_t* TestEd(x64test_t *test, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t 
             *(uint64_t*)test->mem = ret->q[0];
         else
             *(uint32_t*)test->mem = ret->dword[0];
+        return (reg64_t*)test->mem;
+    }
+}
+reg64_t* TestEd1(x64test_t *test, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t delta)
+{
+    uint8_t m = v&0xC7;    // filter Ed
+    if(m>=0xC0) {
+        return &test->emu->regs[(m&0x07)+(rex.b<<3)];
+    } else {
+        reg64_t* ret =  GetECommon(test->emu, addr, rex, m, delta);
+        test->memsize = 1;
+        test->memaddr = (uintptr_t)ret;
+        *(uint8_t*)test->mem = ret->byte[0];
+        return (reg64_t*)test->mem;
+    }
+}
+reg64_t* TestEd2(x64test_t *test, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t delta)
+{
+    uint8_t m = v&0xC7;    // filter Ed
+    if(m>=0xC0) {
+        return &test->emu->regs[(m&0x07)+(rex.b<<3)];
+    } else {
+        reg64_t* ret =  GetECommon(test->emu, addr, rex, m, delta);
+        test->memsize = 2;
+        test->memaddr = (uintptr_t)ret;
+        *(uint16_t*)test->mem = ret->word[0];
         return (reg64_t*)test->mem;
     }
 }

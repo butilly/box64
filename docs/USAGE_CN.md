@@ -80,7 +80,7 @@ BOX64_DYNAREC_CALLRET=1
  * 0: 不优化 CALL/RET，使用跳转表。
  * 1: 尝试优化 CALL/RET，在可能的情况下跳过跳转表。
  * 2: 尝试优化 CALL/RET，在可能的情况下跳过跳转表，同时增加对返回到脏/已修改代码块的代码的处理。在 WowBox64 上不可用。 [默认值]
- * 3: 在 2 的基础上，对叶子函数进行分析，并将符合条件的叶子函数体复制到调用方。目前仅支持龙架构。
+ * 3: 在 2 的基础上，额外跟踪代码块的使用情况，避免回收仍在使用中的代码块。
 
 ### BOX64_DYNAREC_DF
 
@@ -308,10 +308,10 @@ Skip N first CPU cores (Is apply before MAXCPU) 在 WowBox64 中可用。
 
 ### BOX64_DYNAREC_TBB
 
-启用或禁用 libtbb 检测。
+检测 oneTBB（静态链接或 libtbb），并为其调度器代码范围模拟 x86 TSO。
 
- * 0: 不检测 libtbb。
- * 1: 检测 libtbb 并应用保守设置。 [默认值]
+ * 0: 不检测 oneTBB。
+ * 1: 检测 oneTBB 并对其调度器代码范围应用 strongmem=4。 [默认值]
 
 ### BOX64_DYNAREC_X87DOUBLE
 

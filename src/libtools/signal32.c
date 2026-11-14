@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-#define _GNU_SOURCE
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -33,29 +32,11 @@
 #include "emu/x87emu_private.h"
 #include "custommem.h"
 #include "bridge.h"
+#include "sigtools.h"
 #ifdef DYNAREC
 #include "dynablock.h"
 #include "../dynarec/dynablock_private.h"
 #include "dynarec_native.h"
-#if defined(ARM64)
-#include "dynarec/arm64/arm64_mapping.h"
-#define CONTEXT_REG(P, X)   P->uc_mcontext.regs[X]
-#define CONTEXT_PC(P)       P->uc_mcontext.pc
-#elif defined(LA64)
-#include "dynarec/la64/la64_mapping.h"
-#define CONTEXT_REG(P, X)   P->uc_mcontext.__gregs[X]
-#define CONTEXT_PC(P)       P->uc_mcontext.__pc;
-#elif defined(RV64)
-#include "dynarec/rv64/rv64_mapping.h"
-#define CONTEXT_REG(P, X)   P->uc_mcontext.__gregs[X]
-#define CONTEXT_PC(P)       P->uc_mcontext.__gregs[REG_PC]
-#elif defined(PPC64LE)
-#include "dynarec/ppc64le/ppc64le_mapping.h"
-#define CONTEXT_REG(P, X)   P->uc_mcontext.gp_regs[X]
-#define CONTEXT_PC(P)       P->uc_mcontext.gp_regs[PT_NIP]
-#else
-#error Unsupported Architecture
-#endif //arch
 #endif
 
 
@@ -288,8 +269,8 @@ typedef struct __attribute__((packed, aligned(4))) my_siginfo32_s
     union {
 	    int _pad[128/sizeof(int)-3];
 	struct {
-	    __pid_t __si_pid;
-	    __uid_t __si_uid;
+	    pid_t __si_pid;
+	    uid_t __si_uid;
     } _kill;
 	struct {
 	    int si_tid;
@@ -297,13 +278,13 @@ typedef struct __attribute__((packed, aligned(4))) my_siginfo32_s
 	    my_sigval32_t si_sigval;
     } _timer;
 	struct {
-	    __pid_t __si_pid;
-	    __uid_t __si_uid;
+	    pid_t __si_pid;
+	    uid_t __si_uid;
 	    my_sigval32_t si_sigval;
     } _rt;
 	struct {
-	    __pid_t __si_pid;
-	    __uid_t __si_uid;
+	    pid_t __si_pid;
+	    uid_t __si_uid;
 	    int __si_status;
 	    int32_t __si_utime;
 	    int32_t __si_stime;
@@ -485,7 +466,6 @@ void convert_siginfo_to_32(void* d, void* s, int sig)
 void relockMutex(int locks);
 int unlockMutex();
 
-int write_opcode(uintptr_t rip, uintptr_t native_ip, int is32bits);
 #define is_memprot_locked (1<<1)
 #define is_dyndump_locked (1<<8)
 int my_sigactionhandler_oldcode_32(x64emu_t* emu, int32_t sig, int simple, siginfo_t* info, void * ucntx, int* old_code, void* cur_db)
@@ -638,7 +618,7 @@ int my_sigactionhandler_oldcode_32(x64emu_t* emu, int32_t sig, int simple, sigin
         } else {
             sigcontext->uc_mcontext.gregs[I386_TRAPNO] = 14;
             sigcontext->uc_mcontext.gregs[I386_ERR] = 4|((sysmapped && !(real_prot&PROT_READ))?0:1);
-            if(write_opcode(sigcontext->uc_mcontext.gregs[I386_EIP], (uintptr_t)pc, 1))
+            if(write_opcode(sigcontext->uc_mcontext.gregs[I386_EIP], (uintptr_t)pc, 1, ucntx))
                 sigcontext->uc_mcontext.gregs[I386_ERR] |= 2;
         }
         if(info->si_code == SEGV_ACCERR && old_code)

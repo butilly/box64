@@ -5,6 +5,7 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 set(BOX64_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 
+string(REPLACE "," ";" DYNAREC_PASS "${DYNAREC_PASS_STR}")
 string(REPLACE "," ";" INTERPRETER "${INTERPRETER_STR}")
 if(NOT INTERPRETER)
     message(FATAL_ERROR "Build Box64EC from the parent project with -DARM64EC=ON")
@@ -51,7 +52,49 @@ add_library(box64ec SHARED
     "${BOX64_ROOT}/external/musl/sqrt_data.c"
     "${BOX64_ROOT}/external/musl/sqrtf.c"
 )
-foreach(target box64ec box64ec_interpreter)
+set(BOX64EC_TARGETS box64ec box64ec_interpreter)
+
+if(DYNAREC_PASS)
+    set(BOX64EC_DYNAREC_ASM
+        "${BOX64_ROOT}/src/dynarec/arm64/arm64_prolog_ec.S"
+        "${BOX64_ROOT}/src/dynarec/arm64/arm64_epilog_ec.S"
+        "${BOX64_ROOT}/src/dynarec/arm64/arm64_next_ec.S"
+        "${BOX64_ROOT}/src/dynarec/arm64/arm64_lock.S")
+    set_source_files_properties(${BOX64EC_DYNAREC_ASM} PROPERTIES COMPILE_OPTIONS "-mcpu=cortex-a76")
+
+    add_library(box64ec_dynarec_helpers OBJECT
+        "${BOX64_ROOT}/src/dynarec/arm64/arm64_immenc.c"
+        "${BOX64_ROOT}/src/dynarec/arm64/arm64_printer.c"
+        "${BOX64_ROOT}/src/dynarec/arm64/dynarec_arm64_arch.c"
+        "${BOX64_ROOT}/src/dynarec/arm64/dynarec_arm64_functions.c"
+        "${BOX64_ROOT}/src/dynarec/arm64/dynarec_arm64_jmpnext.c"
+        "${BOX64_ROOT}/src/dynarec/arm64/dynarec_arm64_consts.c"
+        "${BOX64_ROOT}/src/dynarec/arm64/updateflags_arm64.c"
+        "${BOX64_ROOT}/src/dynarec/dynablock.c"
+        "${BOX64_ROOT}/src/dynarec/dynarec_native_functions.c"
+        "${BOX64_ROOT}/src/dynarec/dynarec_native.c"
+        "${BOX64_ROOT}/src/dynarec/dynarec.c"
+        "${BOX64_ROOT}/src/dynarec/dynacache_reloc.c"
+        "${BOX64_ROOT}/src/emu/x64test.c"
+        "${BOX64_ROOT}/src/emu/x64trace.c"
+        "${BOX64_ROOT}/src/os/perfmap.c"
+        "${BOX64_ROOT}/src/os/symbolfuncs_wine.c")
+    list(APPEND BOX64EC_TARGETS box64ec_dynarec_helpers)
+    target_sources(box64ec PRIVATE $<TARGET_OBJECTS:box64ec_dynarec_helpers> ${BOX64EC_DYNAREC_ASM})
+    foreach(STEP_VALUE RANGE 3)
+        add_library(box64ec_dynarec_pass${STEP_VALUE} OBJECT ${DYNAREC_PASS})
+        target_compile_definitions(box64ec_dynarec_pass${STEP_VALUE} PRIVATE STEP=${STEP_VALUE})
+        list(APPEND BOX64EC_TARGETS box64ec_dynarec_pass${STEP_VALUE})
+        target_sources(box64ec PRIVATE $<TARGET_OBJECTS:box64ec_dynarec_pass${STEP_VALUE}>)
+    endforeach()
+    add_library(box64ec_test_interpreter OBJECT ${INTERPRETER})
+    target_compile_definitions(box64ec_test_interpreter PRIVATE TEST_INTERPRETER)
+    list(APPEND BOX64EC_TARGETS box64ec_test_interpreter)
+    target_sources(box64ec PRIVATE $<TARGET_OBJECTS:box64ec_test_interpreter>)
+    set(BOX64EC_DYNAREC_DEFINITION DYNAREC)
+endif()
+
+foreach(target ${BOX64EC_TARGETS})
     target_include_directories(${target} PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
         "${BOX64_ROOT}/src/include"
@@ -59,7 +102,7 @@ foreach(target box64ec box64ec_interpreter)
         "${BOX64_ROOT}/wine/include"
         "${BOX64_ROOT}/external/musl"
         "${BOX64_ROOT}/external/musl/internal")
-    target_compile_definitions(${target} PRIVATE ARM64 BOX64EC)
+    target_compile_definitions(${target} PRIVATE ARM64 BOX64EC ${BOX64EC_DYNAREC_DEFINITION})
 
     # ARM64EC contexts cannot preserve scalable vector state.
     target_compile_options(${target} PRIVATE

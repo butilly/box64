@@ -269,6 +269,7 @@ uintptr_t dynarec64_AVX_0F(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int
                 UDF(0);
             } else {
                 INST_NAME("VMOVNTPS Ex, Gx");
+                NOLRCPC();
                 GETG;
                 v0 = sse_get_reg(dyn, ninst, x1, gd, 0);
                 if(vex.l) {
@@ -658,6 +659,7 @@ uintptr_t dynarec64_AVX_0F(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int
                         INST_NAME("VLDMXCSR Md");
                         GETED(0);
                         STRw_U12(ed, xEmu, offsetof(x64emu_t, mxcsr));
+                        SYNC_FPCR_ROUND(x2, x3);
                         if(BOX64ENV(sse_flushto0)) {
                             MRS_fpcr(x2);                   // get fpscr
                             LSRw_IMM(x3, ed, 15);           // get FZ bit

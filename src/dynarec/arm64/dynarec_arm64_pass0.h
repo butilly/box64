@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+#include "tbb.h"
+
 #define INIT    uintptr_t sav_addr=addr
 #define FINI    \
     dyn->isize = addr-sav_addr;         \
@@ -38,7 +40,11 @@
         dyn->n.combined1 = dyn->n.combined2 = 0;\
         dyn->n.swapped = 0; dyn->n.barrier = 0; \
         dyn->insts[ninst].f_entry = dyn->f;     \
-        if(ninst) {dyn->insts[ninst-1].x64.size = dyn->insts[ninst].x64.addr - dyn->insts[ninst-1].x64.addr;}   \
+        dyn->insts[ninst].host_call = 0;        \
+        dyn->insts[ninst].host_call_clobber = 0;\
+        dyn->insts[ninst].x64.strongmem = ((box64_wine && VolatileRangesContains(ip)) ? 0 : (TBBTSORangesContains(ip) ? 4 : BOX64DRENV(dynarec_strongmem))); \
+        if(dyn->insts[ninst].x64.strongmem && cpuext.lrcpc && cpuext.lrcpc2 && cpuext.uscat) dyn->insts[ninst].use_lrcpc = 1;   \
+        if(ninst) {dyn->insts[ninst-1].x64.size = dyn->insts[ninst].x64.addr - dyn->insts[ninst-1].x64.addr;}                   \
         AREFLAGSNEEDED()
 
 #define INST_EPILOG                             \
@@ -46,7 +52,11 @@
         dyn->insts[ninst].n = dyn->n;           \
         if(dyn->insts[ninst].nat_flags_op==NAT_FLAG_OP_TOUCH && !dyn->insts[ninst].set_nat_flags)       \
                 dyn->insts[ninst].nat_flags_op=NAT_FLAG_OP_UNUSABLE;                                    \
-        dyn->insts[ninst].x64.has_next = (ok>0)?1:0;
+        dyn->insts[ninst].x64.has_next = (ok>0)?1:0;                                                    \
+        if(dyn->insts[ninst].use_lrcpc && (!dyn->insts[ninst].has_lrcpc || is_addr_lrcpc(ip)))          \
+            dyn->insts[ninst].use_lrcpc = 0;                                                            \
+        if(dyn->insts[ninst].x64.strongmem && dyn->insts[ninst].use_lrcpc) dyn->insts[ninst].x64.strongmem = 0
+
 #define INST_NAME(name)
 #define DEFAULT                                                                                                               \
     --dyn->size;                                                                                                              \
@@ -58,7 +68,8 @@
         }
 
 
-#define FEMIT(A)        dyn->insts[ninst].nat_flags_op = dyn->insts[ninst].x64.set_flags?NAT_FLAG_OP_TOUCH:NAT_FLAG_OP_UNUSABLE
+#define FEMIT(A)        do {dyn->insts[ninst].nat_flags_op = dyn->insts[ninst].x64.set_flags?NAT_FLAG_OP_TOUCH:NAT_FLAG_OP_UNUSABLE; EMIT(A);} while(0)
+#define LEMIT(A)        do {dyn->insts[ninst].has_lrcpc = 1; EMIT(A);} while(0)
 #define IFNATIVE(A)     if(mark_natflag(dyn, ninst, A, 0))
 #define IFNATIVEN(A)    if(mark_natflag(dyn, ninst, A, 0))
 #define UFLAG_IF if(dyn->insts[ninst].x64.set_flags)

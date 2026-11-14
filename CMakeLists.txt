@@ -265,8 +265,9 @@ elseif(LARCH64)
     set(ASMFLAGS  -pipe -march=loongarch64)
 elseif(RV64)
     add_definitions(-DRV64)
-    set(CFLAGS -pipe -march=rv64gc)
+    set(CFLAGS -pipe -march=rv64gc -fno-tree-vectorize)
     set(ASMFLAGS  -pipe -march=rv64gc)
+    add_compile_options(-fno-tree-vectorize)
 elseif(PPC64LE)
     add_definitions(-DPPC64LE)
     set(CFLAGS -pipe -mcpu=power9)
@@ -384,6 +385,8 @@ endif()
 set(BOX64_ROOT ${CMAKE_SOURCE_DIR})
 
 add_definitions(-std=gnu11 -funwind-tables -fvisibility=hidden)
+add_definitions(-D_GNU_SOURCE=1)
+add_definitions(-D_FILE_OFFSET_BITS=64)
 
 if(USE_CCACHE)
     find_program(CCACHE_FOUND ccache)
@@ -1030,6 +1033,7 @@ if(DYNAREC)
         "${BOX64_ROOT}/src/dynarec/dynarec_native_functions.c"
         "${BOX64_ROOT}/src/dynarec/dynacache_reloc.c"
         "${BOX64_ROOT}/src/dynarec/dynacache_compress.c"
+        "${BOX64_ROOT}/src/dynarec/tbb.c"
         "${BOX64_ROOT}/src/emu/x64test.c"
     )
 endif()
@@ -1103,6 +1107,7 @@ if(RV64_DYNAREC)
         "${BOX64_ROOT}/src/dynarec/rv64/rv64_printer.c"
         "${BOX64_ROOT}/src/dynarec/rv64/dynarec_rv64_jmpnext.c"
         "${BOX64_ROOT}/src/dynarec/rv64/dynarec_rv64_consts.c"
+        "${BOX64_ROOT}/src/dynarec/rv64/rv64_mov_imm.c"
         "${BOX64_ROOT}/src/dynarec/rv64/updateflags_rv64.c"
         )
     set(DYNAREC_ASM
@@ -1557,6 +1562,9 @@ if(NOT _x86 AND NOT _x86_64 AND NOT NOBOX64)
 
   endif()
   set(INSTALL_PATH "/usr/lib/box64-x86_64-linux-gnu")
+  if(NOT NO_LIB_INSTALL AND NOT TERMUX AND NOT ANDROID)
+    install(FILES ${CMAKE_SOURCE_DIR}/x64lib/libwemeet_unlock_shim.so.1 DESTINATION ${INSTALL_PATH})
+  endif()
   if(NOT NO_LIB_INSTALL)
 	if(NOT TERMUX AND NOT ANDROID)
         install(FILES ${CMAKE_SOURCE_DIR}/x64lib/libstdc++.so.5 DESTINATION ${INSTALL_PATH})
@@ -1675,6 +1683,7 @@ if(ARM64EC)
         SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/wine/box64ec"
         CMAKE_ARGS
             -DCMAKE_TOOLCHAIN_FILE=${CMAKE_CURRENT_SOURCE_DIR}/wine/toolchain_mingw_arm64ec.cmake
+            -DDYNAREC_PASS_STR=${DYNAREC_PASS_STR}
             -DINTERPRETER_STR=${INTERPRETER_STR}
             -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
         INSTALL_COMMAND ""

@@ -223,7 +223,7 @@ uintptr_t dynarec64_AVX_F3_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
         case 0x2C:
             INST_NAME("VCVTTSS2SI Gd, Ex");
             nextop = F8;
-            GETGD;
+            GETGDd;
             d0 = fpu_get_scratch(dyn);
             if (MODREG) {
                 ed = (nextop & 7) + (rex.b << 3);
@@ -237,6 +237,37 @@ uintptr_t dynarec64_AVX_F3_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
                 FSFLAGSI(0);
             }
             FCVTSxw(gd, d0, RD_RTZ);
+            if (!rex.w) ZEROUP(gd);
+            if (!BOX64ENV(dynarec_fastround)) {
+                FRFLAGS(x5);
+                ANDI(x5, x5, (1 << FR_NV) | (1 << FR_OF));
+                CBZ_NEXT(x5);
+                if (rex.w) {
+                    MOV64x(gd, 0x8000000000000000LL);
+                } else {
+                    MOV32w(gd, 0x80000000);
+                }
+            }
+            break;
+        case 0x2D:
+            INST_NAME("VCVTSS2SI Gd, Ex");
+            nextop = F8;
+            GETGDd;
+            d0 = fpu_get_scratch(dyn);
+            if (MODREG) {
+                ed = (nextop & 7) + (rex.b << 3);
+                sse_forget_reg(dyn, ninst, x1, ed);
+                FLW(d0, xEmu, offsetof(x64emu_t, xmm[ed]));
+            } else {
+                addr = geted(dyn, addr, ninst, nextop, &wback, x2, x1, &fixedaddress, rex, NULL, 0, 0);
+                FLW(d0, wback, fixedaddress);
+            }
+            if (!BOX64ENV(dynarec_fastround)) {
+                FSFLAGSI(0);
+            }
+            u8 = sse_setround(dyn, ninst, x5, x6);
+            FCVTSxw(gd, d0, RD_DYN);
+            x87_restoreround(dyn, ninst, u8);
             if (!rex.w) ZEROUP(gd);
             if (!BOX64ENV(dynarec_fastround)) {
                 FRFLAGS(x5);
@@ -332,42 +363,60 @@ uintptr_t dynarec64_AVX_F3_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
         case 0x5B:
             INST_NAME("VCVTTPS2DQ Gx, Ex");
             nextop = F8;
-            GETEX(x2, 0, vex.l ? 28 : 12);
             GETGX();
             GETGY();
+            GETEX(x2, 0, vex.l ? 28 : 12);
             v0 = fpu_get_scratch(dyn);
-            for (int i = 0; i < 4; ++i) {
-                if (!BOX64ENV(dynarec_fastround)) {
-                    FSFLAGSI(0);
-                }
-                FLW(v0, wback, fixedaddress + i * 4);
-                FCVTWS(x3, v0, RD_RTZ);
-                if (!BOX64ENV(dynarec_fastround)) {
-                    FRFLAGS(x5);
-                    ANDI(x5, x5, (1 << FR_NV) | (1 << FR_OF));
-                    BEQZ(x5, 4 + 4);
-                    LUI(x3, 0x80000000 >> 12);
-                }
-                SW(x3, gback, gdoffset + i * 4);
-            }
-            if (vex.l) {
-                GETEY();
+            if (BOX64ENV(dynarec_fastround)) {
                 for (int i = 0; i < 4; ++i) {
-                    if (!BOX64ENV(dynarec_fastround)) {
-                        FSFLAGSI(0);
-                    }
                     FLW(v0, wback, fixedaddress + i * 4);
-                    FCVTWS(x3, v0, RD_RTZ);
-                    if (!BOX64ENV(dynarec_fastround)) {
-                        FRFLAGS(x5);
-                        ANDI(x5, x5, (1 << FR_NV) | (1 << FR_OF));
-                        BEQZ(x5, 4 + 4);
-                        LUI(x3, 0x80000000 >> 12);
-                    }
-                    SW(x3, gback, gyoffset + i * 4);
+                    FCVTWS(x1, v0, RD_RTZ);
+                    SW(x1, gback, gdoffset + i * 4);
                 }
-            } else
-                YMM0(gd);
+                if (vex.l) {
+                    GETEY();
+                    for (int i = 0; i < 4; ++i) {
+                        FLW(v0, wback, fixedaddress + i * 4);
+                        FCVTWS(x1, v0, RD_RTZ);
+                        SW(x1, gback, gyoffset + i * 4);
+                    }
+                } else
+                    YMM0(gd);
+            } else {
+                MOV32w(x6, 0x80000000); // indefinite integer result
+                MV(x4, xZR);
+                for (int i = 0; i < 4; ++i) {
+                    FSFLAGSI(0); // reset all bits
+                    FLW(v0, wback, fixedaddress + i * 4);
+                    FCVTWS(x1, v0, RD_RTZ);
+                    FRFLAGS(x5); // get back FPSR to check the invalid bit
+                    ANDI(x5, x5, (1 << FR_NV) | (1 << FR_OF));
+                    SNEZ(x5, x5);
+                    OR(x4, x4, x5);
+                    BEQZ(x5, 4 + 4); // skip the MV
+                    MV(x1, x6);
+                    SW(x1, gback, gdoffset + i * 4);
+                }
+                if (vex.l) {
+                    GETEY();
+                    for (int i = 0; i < 4; ++i) {
+                        FSFLAGSI(0); // reset all bits
+                        FLW(v0, wback, fixedaddress + i * 4);
+                        FCVTWS(x1, v0, RD_RTZ);
+                        FRFLAGS(x5); // get back FPSR to check the invalid bit
+                        ANDI(x5, x5, (1 << FR_NV) | (1 << FR_OF));
+                        SNEZ(x5, x5);
+                        OR(x4, x4, x5);
+                        BEQZ(x5, 4 + 4); // skip the MV
+                        MV(x1, x6);
+                        SW(x1, gback, gyoffset + i * 4);
+                    }
+                } else
+                    YMM0(gd);
+                BEQZ_MARK(x4);
+                emit_mxcsr_raise_invalid(x5);
+                MARK;
+            }
             break;
         case 0x5C:
             INST_NAME("VSUBSS Gx, Vx, Ex");
@@ -420,15 +469,9 @@ uintptr_t dynarec64_AVX_F3_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
             d1 = fpu_get_scratch(dyn);
             FLW(d0, vback, vxoffset);
             FLW(d1, wback, fixedaddress);
-            FEQS(x2, d0, d0);
-            FEQS(x3, d1, d1);
-            AND(x2, x2, x3);
-            BEQ_MARK(x2, xZR);
-            FLES(x2, d1, d0);
-            BEQ_MARK2(x2, xZR);
-            MARK;
+            FLTS(x2, d0, d1);
+            BNEZ(x2, 8);
             FMVS(d0, d1);
-            MARK2;
             FSW(d0, gback, gdoffset);
             if (gd != vex.v) {
                 LWU(x2, vback, vxoffset + 4);
@@ -449,15 +492,9 @@ uintptr_t dynarec64_AVX_F3_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
             d1 = fpu_get_scratch(dyn);
             FLW(d0, vback, vxoffset);
             FLW(d1, wback, fixedaddress);
-            FEQS(x2, d0, d0);
-            FEQS(x3, d1, d1);
-            AND(x2, x2, x3);
-            BEQ_MARK(x2, xZR);
-            FLES(x2, d0, d1);
-            BEQ_MARK2(x2, xZR);
-            MARK;
+            FLTS(x2, d1, d0);
+            BNEZ(x2, 8);
             FMVS(d0, d1);
-            MARK2;
             FSW(d0, gback, gdoffset);
             if (gd != vex.v) {
                 LWU(x2, vback, vxoffset + 4);

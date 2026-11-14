@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-#define _GNU_SOURCE
 #include <sys/syscall.h>
 #include <sched.h>
 #include <unistd.h>
@@ -210,6 +209,9 @@ static void checkFtrace()
 
 void PrintfFtrace(int prefix, const char* fmt, ...)
 {
+    // fallback for logs before init
+    if(!ftrace) ftrace = stderr;
+
     if (ftrace_name) {
         checkFtrace();
     } else if(trace_fd==-1)

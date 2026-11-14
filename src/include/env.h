@@ -70,7 +70,7 @@ extern char* ftrace_name;
     BOOLEAN(BOX64_DYNAREC_PERFMAP, dynarec_perf_map, 0, 0, 0)                    \
     INTEGER(BOX64_DYNAREC_SAFEFLAGS, dynarec_safeflags, 1, 0, 2, 1, 2)           \
     INTEGER(BOX64_DYNAREC_STRONGMEM, dynarec_strongmem, 0, 0, 4, 1, 3)           \
-    BOOLEAN(BOX64_DYNAREC_TBB, dynarec_tbb, 1, 0, 0)                             \
+    BOOLEAN(BOX64_DYNAREC_TBB, dynarec_tbb, 1, 0, 1)                             \
     STRING(BOX64_DYNAREC_TEST, dynarec_test_str, 1, 0)                           \
     BOOLEAN(BOX64_DYNAREC_TEST_NODUP, dynarec_test_nodup, 0, 1, 0)               \
     BOOLEAN(BOX64_DYNAREC_TEST_NODUMP, dynarec_test_nodump, 1, 1, 0)             \
@@ -98,6 +98,7 @@ extern char* ftrace_name;
     INTEGER(BOX64_JITGDB, jitgdb, 0, 0, 3, 0, 0)                                 \
     BOOLEAN(BOX64_JVM, jvm, 1, 0, 0)                                             \
     STRING(BOX64_LD_LIBRARY_PATH, ld_library_path, 0, 0)                         \
+    STRING(BOX64_LD_PRELOAD, ld_preload, 0, 0)                                   \
     BOOLEAN(BOX64_LIBCEF, libcef, 0, 0, 0)                                       \
     STRING(BOX64_LIBGL, libgl, 0, 0)                                             \
     ADDRESS(BOX64_LOAD_ADDR, load_addr, 0, 0)                                    \

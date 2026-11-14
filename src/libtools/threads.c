@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // __USE_UNIX98 is needed for sttype / gettype definition
 #define __USE_UNIX98
-#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
@@ -44,7 +43,7 @@ _Atomic int g_active_emu_workers = 0;
 typedef void (*vFppp_t)(void*, void*, void*);
 typedef void (*vFpi_t)(void*, int);
 typedef int (*iFppip_t)(void*, void*, int, void*);
-typedef int (*iFli_t)(long unsigned int, int);
+typedef int (*iFli_t)(pthread_t, int);
 typedef struct emuthread_s emuthread_t;
 
 static vFppp_t real_pthread_cleanup_push_defer = NULL;
@@ -278,7 +277,7 @@ x64emu_t* thread_get_emu(void)
 		int stacksize = 256*1024;
 		void* stack = NULL;
 		if(box64_is32bits)
-			stack = mmap64(NULL, stacksize, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_32BIT, -1, 0);
+			stack = mmap(NULL, stacksize, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_32BIT, -1, 0);
 		else
             stack = InternalMmap(NULL, stacksize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_GROWSDOWN, -1, 0);
 		if(stack!=MAP_FAILED && !box64_quit)	// to avoid marking memory when box64 is quitting
@@ -941,6 +940,8 @@ EXPORT int my_pthread_getaffinity_np_old(x64emu_t* emu, pthread_t thread, void* 
 			cpumask_maxcpu(cpuset, 128, BOX64ENV(maxcpu));
 		}
 	}
+
+	return ret;
 }
 
 

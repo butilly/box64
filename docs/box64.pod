@@ -175,7 +175,7 @@ Optimize CALL/RET opcodes. Available in WowBox64.
  * 0 : Do not optimize CALL/RET, use jump table. 
  * 1 : Try to optimize CALL/RET, skipping the jump table when possible. 
  * 2 : Try to optimize CALL/RET, skipping the jump table when possible, adding code to handle return to dirty/modified block. Does not work on WowBox64. [Default]
- * 3 : Same as 2, with leaf call analysis that tries to duplicate leaf bodies into their callers. Only available for LoongArch for now. 
+ * 3 : Same as 2, but also track dynablock usage so blocks are not reclaimed while still in use. 
 
 
 =item B<BOX64_DYNAREC_DF> =I<0|1>
@@ -351,10 +351,10 @@ Enable the emulation of x86 strong memory model. Available in WowBox64.
 
 =item B<BOX64_DYNAREC_TBB> =I<0|1>
 
-Enable or disable libtbb detection.
+Detect oneTBB (statically linked or libtbb) and emulate x86 TSO for its scheduler code range.
 
- * 0 : Do not detect libtbb. 
- * 1 : Detect libtbb and apply conservative settings. [Default]
+ * 0 : Do not detect oneTBB. 
+ * 1 : Detect oneTBB and apply strongmem=4 to its scheduler code range. [Default]
 
 
 =item B<BOX64_DYNAREC_TEST> =I<0|1|0xXXXXXXXX-0xYYYYYYYY>

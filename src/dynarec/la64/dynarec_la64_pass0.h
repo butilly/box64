@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: MIT
+
+#include "tbb.h"
+
 #define INIT uintptr_t sav_addr = addr
 #define FINI                           \
     dyn->isize = addr - sav_addr;      \
@@ -70,17 +73,10 @@
     } else                                         \
         dyn->insts[ninst].barrier_maybe = 1
 #define SET_HASCALLRET() dyn->insts[ninst].x64.has_callret = 1
-#define MARK_LEAF_CALL() dyn->insts[ninst].x64.leaf_kind = LEAF_KIND_CALL
-#define MARK_LEAF_CALL_TARGET(T)                            \
-    do {                                                    \
-        dyn->insts[ninst].x64.leaf_kind = LEAF_KIND_CALL;   \
-        dyn->insts[ninst].x64.leaf_target = (uintptr_t)(T); \
-    } while (0)
-#define MARK_LEAF_RET()  dyn->insts[ninst].x64.leaf_kind = LEAF_KIND_RET
-#define MARK_LEAF_RSP(F) dyn->insts[ninst].x64.leaf_rsp |= (F)
 #define NEW_INST                                                                                                 \
     ++dyn->size;                                                                                                 \
     dyn->insts[ninst].x64.addr = ip;                                                                             \
+    dyn->insts[ninst].rsp_class = 0;                                                                             \
     dyn->lsx.combined1 = dyn->lsx.combined2 = 0;                                                                 \
     dyn->lsx.swapped = 0;                                                                                        \
     dyn->lsx.barrier = 0;                                                                                        \
@@ -96,6 +92,9 @@
     dyn->insts[ninst].host_call = 0;                                                                             \
     dyn->insts[ninst].call_window = 0;                                                                           \
     dyn->insts[ninst].f_entry = dyn->f;                                                                          \
+    dyn->insts[ninst].x64.strongmem = ((box64_wine && VolatileRangesContains(ip))                                \
+            ? 0                                                                                                  \
+            : (TBBTSORangesContains(ip) ? 4 : BOX64DRENV(dynarec_strongmem)));                                   \
     if (ninst) { dyn->insts[ninst - 1].x64.size = dyn->insts[ninst].x64.addr - dyn->insts[ninst - 1].x64.addr; } \
     AREFLAGSNEEDED()
 

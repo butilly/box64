@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-#define _GNU_SOURCE
 #define __USE_GNU
 #include <stdint.h>
 #include <stdio.h>
@@ -28,6 +27,7 @@
 #include "symbols.h"
 #include "elfs/elfloader_private.h"
 #include "library_inner.h"
+#include "tbb.h"
 
 #include "wrappedlibs.h"
 // create the native lib list
@@ -382,11 +382,6 @@ static int loadEmulatedLib(const char* libname, library_t *lib, box64context_t* 
             SET_BOX64ENV(unity, 1);
             env_changed = 1;
         }
-        if(libname && BOX64ENV(dynarec_tbb) && strstr(libname, "libtbb.so")) {
-            printf_dump(LOG_INFO, "libtbb detected, enable Dynarec StrongMem\n");
-            SET_BOX64ENV(dynarec_strongmem, 1);
-            env_changed = 1;
-        }
         #endif
         if(libname && BOX64ENV(jvm) && strstr(libname, "libjvm.so")) {
             #ifdef DYNAREC
@@ -611,6 +606,16 @@ int FinalizeLibrary(library_t* lib, lib_t* local_maplib, int bindnow, int deepbi
             printf_log(LOG_NONE, "Error: relocating Plt symbols in elf %s\n", lib->name);
             return 1;
         }
+#ifdef DYNAREC
+        if (BOX64ENV(dynarec_tbb) && lib->name && strstr(lib->name, "libtbb.so")) {
+            if (TBBTSOAddElf(elf_header)) {
+                printf_log(LOG_INFO, "libtbb detected, applying safe StrongMem emulation to its code range\n");
+            } else {
+                printf_log(LOG_INFO, "libtbb detected but oneTBB pattern matching failed, falling back to conservative but inaccurate StrongMem emulation settings\n");
+                SET_BOX64ENV(dynarec_strongmem, 1);
+            }
+        }
+#endif
 #ifdef HAVE_TRACE
         if(trace_func) {
             int weak;
@@ -1323,6 +1328,13 @@ void free_neededlib(needed_libs_t* needed)
         FreeCollection(needed->rpath);
         box_free(needed->rpath);
     }
+    if(needed->nonstaticnames) {
+        for(int i=0; i<needed->ns_size; ++i)
+            box_free(needed->nonstaticnames[i]);
+        box_free(needed->nonstaticnames);
+        needed->ns_size = 0;
+        needed->nonstaticnames = NULL;
+    }
     box_free(needed);
 }
 void add1_neededlib(needed_libs_t* needed)
@@ -1406,7 +1418,29 @@ needed_libs_t* copy_neededlib(needed_libs_t* needed)
     ret->names = (char**)box_calloc(ret->cap, sizeof(char*));
     memcpy(ret->libs, needed->libs, ret->size*sizeof(library_t*));
     memcpy(ret->names, needed->names, ret->size*sizeof(char*));
+    if(needed->nonstaticnames) {
+        ret->ns_size = needed->ns_size;
+        ret->nonstaticnames = (char**)box_malloc(ret->ns_size*sizeof(char*));
+        for(int i=0; i<ret->ns_size; ++i)
+            ret->nonstaticnames[i] = box_strdup(needed->nonstaticnames[i]);
+    }
     return ret;
+}
+char* add1nsname(needed_libs_t* needed, char* nsname)
+{
+    if(!needed->ns_size) {
+        needed->ns_size = 1;
+        needed->nonstaticnames = (char**)box_malloc(needed->ns_size*sizeof(char*));
+        needed->nonstaticnames[0] = nsname;
+        return needed->nonstaticnames[0];
+    }
+    for(int i=0; i<needed->ns_size; ++i)
+        if(!strcmp(needed->nonstaticnames[i], nsname))
+            return needed->nonstaticnames[i];
+    int i = needed->ns_size++;
+    needed->nonstaticnames = (char**)box_realloc(needed->nonstaticnames, (i+1)*sizeof(char*));
+    needed->nonstaticnames[i] = nsname;
+    return needed->nonstaticnames[i];
 }
 
 void setNeededLibs(library_t* lib, int n, ...)

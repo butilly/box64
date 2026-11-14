@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-#define _GNU_SOURCE
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -285,7 +284,7 @@ uintptr_t Run660F(x64emu_t *emu, rex_t rex, uintptr_t addr)
     case 0x2F:                      /* COMISD Gx, Ex */
         RESET_FLAGS(emu);
         nextop = F8;
-        GETEX(0);
+        GETEX8(0);
         GETGX;
         if(isnan(GX->d[0]) || isnan(EX->d[0])) {
             SET_FLAG(F_ZF); SET_FLAG(F_PF); SET_FLAG(F_CF);
@@ -520,35 +519,35 @@ uintptr_t Run660F(x64emu_t *emu, rex_t rex, uintptr_t addr)
                 break;
             case 0x21:  /* PMOVSXBD Gx, Ex */
                 nextop = F8;
-                GETEX(0);
+                GETEX4(0);
                 GETGX;
                 for(int i=3; i>=0; --i)
                     GX->sd[i] = EX->sb[i];
                 break;
             case 0x22:  /* PMOVSXBQ Gx, Ex */
                 nextop = F8;
-                GETEX(0);
+                GETEX2(0);
                 GETGX;
                 for(int i=1; i>=0; --i)
                     GX->sq[i] = EX->sb[i];
                 break;
             case 0x23:  /* PMOVSXWD Gx, Ex */
                 nextop = F8;
-                GETEX(0);
+                GETEX8(0);
                 GETGX;
                 for(int i=3; i>=0; --i)
                     GX->sd[i] = EX->sw[i];
                 break;
             case 0x24:  /* PMOVSXWQ Gx, Ex */
                 nextop = F8;
-                GETEX(0);
+                GETEX4(0);
                 GETGX;
                 for(int i=1; i>=0; --i)
                     GX->sq[i] = EX->sw[i];
                 break;
             case 0x25:  /* PMOVSXDQ Gx, Ex */
                 nextop = F8;
-                GETEX(0);
+                GETEX8(0);
                 GETGX;
                 for(int i=1; i>=0; --i)
                     GX->sq[i] = EX->sd[i];
@@ -599,35 +598,35 @@ uintptr_t Run660F(x64emu_t *emu, rex_t rex, uintptr_t addr)
                 break;
             case 0x31: /* PMOVZXBD Gx, Ex */
                 nextop = F8;
-                GETEX(0);
+                GETEX4(0);
                 GETGX;
                 for(int i=3; i>=0; --i)
                     GX->ud[i] = EX->ub[i];
                 break;
             case 0x32: /* PMOVZXBQ Gx, Ex */
                 nextop = F8;
-                GETEX(0);
+                GETEX2(0);
                 GETGX;
                 for(int i=1; i>=0; --i)
                     GX->q[i] = EX->ub[i];
                 break;
             case 0x33: /* PMOVZXWD Gx, Ex */
                 nextop = F8;
-                GETEX(0);
+                GETEX8(0);
                 GETGX;
                 for(int i=3; i>=0; --i)
                     GX->ud[i] = EX->uw[i];
                 break;
             case 0x34: /* PMOVZXWQ Gx, Ex */
                 nextop = F8;
-                GETEX(0);
+                GETEX4(0);
                 GETGX;
                 for(int i=1; i>=0; --i)
                     GX->q[i] = EX->uw[i];
                 break;
             case 0x35: /* PMOVZXDQ Gx, Ex */
                 nextop = F8;
-                GETEX(0);
+                GETEX8(0);
                 GETGX;
                 for(int i=1; i>=0; --i)
                     GX->q[i] = EX->ud[i];
@@ -901,7 +900,7 @@ uintptr_t Run660F(x64emu_t *emu, rex_t rex, uintptr_t addr)
                         fesetround(FE_TONEAREST);
                         for(int i=0; i<4; ++i)
                             #ifdef RV64
-                            if(isnanf(EX->f[i]))
+                            if(isnan(EX->f[i]))
                                 GX->ud[i] = EX->ud[i] | 0x00400000;
                             else
                             #endif
@@ -912,7 +911,7 @@ uintptr_t Run660F(x64emu_t *emu, rex_t rex, uintptr_t addr)
                     case ROUND_Down:
                         for(int i=0; i<4; ++i)
                             #ifdef RV64
-                            if(isnanf(EX->f[i]))
+                            if(isnan(EX->f[i]))
                                 GX->ud[i] = EX->ud[i] | 0x00400000;
                             else
                             #endif
@@ -921,7 +920,7 @@ uintptr_t Run660F(x64emu_t *emu, rex_t rex, uintptr_t addr)
                     case ROUND_Up:
                         for(int i=0; i<4; ++i)
                             #ifdef RV64
-                            if(isnanf(EX->f[i]))
+                            if(isnan(EX->f[i]))
                                 GX->ud[i] = EX->ud[i] | 0x00400000;
                             else
                             #endif
@@ -930,7 +929,7 @@ uintptr_t Run660F(x64emu_t *emu, rex_t rex, uintptr_t addr)
                     case ROUND_Chop:
                         for(int i=0; i<4; ++i)
                             #ifdef RV64
-                            if(isnanf(EX->f[i]))
+                            if(isnan(EX->f[i]))
                                 GX->ud[i] = EX->ud[i] | 0x00400000;
                             else
                             #endif
@@ -996,7 +995,7 @@ uintptr_t Run660F(x64emu_t *emu, rex_t rex, uintptr_t addr)
                 GETGX;
                 tmp8u = F8; // ignoring bit 3 interupt thingy
                 #ifdef RV64
-                if(isnanf(EX->f[0])) {
+                if(isnan(EX->f[0])) {
                     GX->ud[0] = EX->ud[0] | 0x00400000;
                     break;
                 }
@@ -1150,7 +1149,7 @@ uintptr_t Run660F(x64emu_t *emu, rex_t rex, uintptr_t addr)
 
             case 0x20:      // PINSRB GX, ED, u8
                 nextop = F8;
-                GETED(1);   // It's ED, and not EB
+                GETE1(1);
                 GETGX;
                 tmp8u = F8;
                 GX->ub[tmp8u&0xf] = ED->byte[0];
@@ -1462,7 +1461,7 @@ uintptr_t Run660F(x64emu_t *emu, rex_t rex, uintptr_t addr)
         GETEX(0);
         GETGX;
         for(int i=0; i<4; ++i) {
-            if(isnanf(EX->f[i]))
+            if(isnan(EX->f[i]))
                 tmp64s = INT32_MIN;
             else
                 switch(emu->mxcsr.f.MXCSR_RC) {
@@ -2379,7 +2378,7 @@ uintptr_t Run660F(x64emu_t *emu, rex_t rex, uintptr_t addr)
 
     case 0xC4:  /* PINSRW Gx,Ew,Ib */
         nextop = F8;
-        GETED(1);
+        GETE2(1);
         GETGX;
         tmp8u = F8;
         GX->uw[tmp8u&7] = ED->word[0];   // only low 16bits
