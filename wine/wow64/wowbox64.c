@@ -336,8 +336,8 @@ NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
         /* Log the original context before the handler retries or replaces it.
          * The saved emulator registers may lag behind live JIT registers. */
         snprintf(line, sizeof(line),
-                 "[WOWBOX64-FAULT] tid=%lx code=%lx flags=%lx params=%lu exception=%p host-pc=%p host-sp=%p access=%llu fault=%p emu=%p saved-eip=%p saved-esp=%08x\n",
-                 (unsigned long)(uintptr_t)NtCurrentTeb()->ClientId.UniqueThread, (unsigned long)rec->ExceptionCode,
+                 "[WOWBOX64-FAULT] teb=%p code=%lx flags=%lx params=%lu exception=%p host-pc=%p host-sp=%p access=%llu fault=%p emu=%p saved-eip=%p saved-esp=%08x\n",
+                 NtCurrentTeb(), (unsigned long)rec->ExceptionCode,
                  (unsigned long)rec->ExceptionFlags, (unsigned long)rec->NumberParameters,
                  rec->ExceptionAddress, (void*)(uintptr_t)ctx->Pc, (void*)(uintptr_t)ctx->Sp,
                  rec->NumberParameters > 0 ? (unsigned long long)rec->ExceptionInformation[0] : 0,
@@ -352,8 +352,8 @@ NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
         NTSTATUS query = NtQueryVirtualMemory(NtCurrentProcess(), (void*)lookup_pc,
                                               MemoryBasicInformation, &mem_info, sizeof(mem_info), NULL);
         snprintf(line, sizeof(line),
-                 "[WOWBOX64-FAULT] tid=%lx jit=%p mapped-eip=%p lookup=%p query=%lx allocation=%p offset=%p state=%lx protect=%lx type=%lx\n",
-                 (unsigned long)(uintptr_t)NtCurrentTeb()->ClientId.UniqueThread, fault_db, (void*)guest_pc, (void*)lookup_pc,
+                 "[WOWBOX64-FAULT] teb=%p jit=%p mapped-eip=%p lookup=%p query=%lx allocation=%p offset=%p state=%lx protect=%lx type=%lx\n",
+                 NtCurrentTeb(), fault_db, (void*)guest_pc, (void*)lookup_pc,
                  (unsigned long)query, mem_info.AllocationBase,
                  NT_SUCCESS(query) ? (void*)(lookup_pc - (uintptr_t)mem_info.AllocationBase) : NULL,
                  (unsigned long)mem_info.State, (unsigned long)mem_info.Protect, (unsigned long)mem_info.Type);
