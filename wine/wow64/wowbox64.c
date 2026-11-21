@@ -53,6 +53,10 @@ static uint32_t x86emu_parity_tab[8] = {
 static UINT16 DECLSPEC_ALIGN(4096) bopcode[4096 / sizeof(UINT16)];
 static UINT16 DECLSPEC_ALIGN(4096) unxcode[4096 / sizeof(UINT16)];
 
+/* Temporary, per-application exception diagnostic; no execution policy changes. */
+BOOL wow64_fault_diagnostic;
+static LONG fault_diagnostic_count[2];
+
 typedef UINT64 unixlib_handle_t;
 NTSTATUS(WINAPI* __wine_unix_call_dispatcher)(unixlib_handle_t, unsigned int, void*);
 
@@ -272,8 +276,12 @@ NTSTATUS WINAPI BTCpuProcessInit(void)
         if (shortname) {
             shortname++;
             ApplyEnvFileEntry(shortname);
+            wow64_fault_diagnostic = !_stricmp(shortname, "JustCause2.exe");
         }
     }
+
+    if (wow64_fault_diagnostic)
+        __wine_dbg_output("[WOWBOX64-FAULT] diagnostic active; exception handling unchanged\n");
 
     PrintEnvVariables(&box64env, LOG_INFO);
 
@@ -320,6 +328,37 @@ NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
     x64emu_t* emu = NtCurrentTeb()->TlsSlots[WOW64_TLS_EMU];
     EXCEPTION_RECORD* rec = ptrs->ExceptionRecord;
     CONTEXT* ctx = ptrs->ContextRecord;
+
+    if (wow64_fault_diagnostic && rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION
+        && InterlockedIncrement(&fault_diagnostic_count[rec->NumberParameters == 2
+                                                        && rec->ExceptionInformation[0] == 1]) <= 16) {
+        char line[768];
+        /* Log the original context before the handler retries or replaces it.
+         * The saved emulator registers may lag behind live JIT registers. */
+        snprintf(line, sizeof(line),
+                 "[WOWBOX64-FAULT] tid=%lx code=%lx flags=%lx params=%lu exception=%p host-pc=%p host-sp=%p access=%llu fault=%p emu=%p saved-eip=%p saved-esp=%08x\n",
+                 (unsigned long)(uintptr_t)NtCurrentTeb()->ClientId.UniqueThread, (unsigned long)rec->ExceptionCode,
+                 (unsigned long)rec->ExceptionFlags, (unsigned long)rec->NumberParameters,
+                 rec->ExceptionAddress, (void*)(uintptr_t)ctx->Pc, (void*)(uintptr_t)ctx->Sp,
+                 rec->NumberParameters > 0 ? (unsigned long long)rec->ExceptionInformation[0] : 0,
+                 rec->NumberParameters > 1 ? (void*)rec->ExceptionInformation[1] : NULL,
+                 emu, emu ? (void*)(uintptr_t)R_RIP : NULL, emu ? R_ESP : 0);
+        __wine_dbg_output(line);
+
+        dynablock_t* fault_db = FindDynablockFromNativeAddress((void*)(uintptr_t)ctx->Pc);
+        uintptr_t guest_pc = fault_db ? getX64Address(fault_db, ctx->Pc) : 0;
+        MEMORY_BASIC_INFORMATION mem_info = {0};
+        uintptr_t lookup_pc = guest_pc ? guest_pc : (emu ? R_RIP : 0);
+        NTSTATUS query = NtQueryVirtualMemory(NtCurrentProcess(), (void*)lookup_pc,
+                                              MemoryBasicInformation, &mem_info, sizeof(mem_info), NULL);
+        snprintf(line, sizeof(line),
+                 "[WOWBOX64-FAULT] tid=%lx jit=%p mapped-eip=%p lookup=%p query=%lx allocation=%p offset=%p state=%lx protect=%lx type=%lx\n",
+                 (unsigned long)(uintptr_t)NtCurrentTeb()->ClientId.UniqueThread, fault_db, (void*)guest_pc, (void*)lookup_pc,
+                 (unsigned long)query, mem_info.AllocationBase,
+                 NT_SUCCESS(query) ? (void*)(lookup_pc - (uintptr_t)mem_info.AllocationBase) : NULL,
+                 (unsigned long)mem_info.State, (unsigned long)mem_info.Protect, (unsigned long)mem_info.Type);
+        __wine_dbg_output(line);
+    }
 
     if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
         dynablock_t* db = NULL;

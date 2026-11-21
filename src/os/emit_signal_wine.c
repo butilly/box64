@@ -66,6 +66,15 @@ void EmitSignal(x64emu_t* emu, int sig, void* addr, int code)
 #else
     EXCEPTION_RECORD rec;
 
+    /* Capture a software-generated fault before RtlRaiseException loses its
+     * guest origin in a native WOW64 unwind. Bounded and enabled per exe. */
+    extern BOOL wow64_fault_diagnostic;
+    static LONG emitted_fault_count;
+    if (wow64_fault_diagnostic && InterlockedIncrement(&emitted_fault_count) <= 16) {
+        printf_log(LOG_NONE, "[WOWBOX64-EMIT] sig=%d code=%x addr=%p saved-eip=%p saved-esp=%08x\n",
+                   sig, code, addr, (void*)(uintptr_t)R_RIP, R_ESP);
+    }
+
     switch (sig) {
         case X64_SIGILL:
             printf_log(LOG_DEBUG, "SIGILL at %p with code %d\n", addr, code);
