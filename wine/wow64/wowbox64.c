@@ -320,6 +320,25 @@ NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
     x64emu_t* emu = NtCurrentTeb()->TlsSlots[WOW64_TLS_EMU];
     EXCEPTION_RECORD* rec = ptrs->ExceptionRecord;
     CONTEXT* ctx = ptrs->ContextRecord;
+    void* native_pc = (void*)(ULONG_PTR)ctx->Pc;
+    static LONG fault_log_count;
+
+    /* The normal signal diagnostics are not used by the WOW64 frontend. */
+    if (fault_log_count < 8 && InterlockedIncrement(&fault_log_count) <= 8) {
+        MEMORY_BASIC_INFORMATION info = {0};
+        NTSTATUS status = NtQueryVirtualMemory(NtCurrentProcess(), native_pc,
+            MemoryBasicInformation, &info, sizeof(info), NULL);
+        printf_log(LOG_NONE, "WOW64 fault code=%08x native_pc=%p exception_addr=%p "
+            "cached_guest_pc=%p access=%llu address=%p query=%08x "
+            "allocation=%p offset=%llx state=%08x protect=%08x entry_context=%p\n",
+            rec->ExceptionCode, native_pc, rec->ExceptionAddress,
+            emu ? (void*)(uintptr_t)R_RIP : NULL,
+            rec->NumberParameters >= 1 ? (unsigned long long)rec->ExceptionInformation[0] : 0,
+            rec->NumberParameters >= 2 ? (void*)(ULONG_PTR)rec->ExceptionInformation[1] : NULL,
+            status, info.AllocationBase,
+            NT_SUCCESS(status) ? (unsigned long long)((ULONG_PTR)native_pc - (ULONG_PTR)info.AllocationBase) : 0,
+            info.State, info.Protect, NtCurrentTeb()->TlsSlots[WOW64_TLS_ENTRY_CONTEXT]);
+    }
 
     if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
         dynablock_t* db = NULL;
@@ -335,7 +354,8 @@ NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
         }
     }
 
-    if (!box64_is_addr_in_jit(ULongToPtr(ctx->Pc)))
+    /* Native JIT allocations are not limited to the 32-bit guest address space. */
+    if (!box64_is_addr_in_jit(native_pc))
         return STATUS_SUCCESS;
 
     /* Replace the host context with one captured before JIT entry so host code can unwind */
