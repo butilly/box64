@@ -13,6 +13,8 @@
 #include "os.h"
 #include "custommem.h"
 #include "dynablock.h"
+#include "dynarec/arm64/arm64_mapping.h"
+#include "dynarec/arm64/dynarec_arm64_arch.h"
 #include "env.h"
 #include "emu/x64emu_private.h"
 #include "emu/x87emu_private.h"
@@ -307,13 +309,6 @@ NTSTATUS WINAPI BTCpuProcessInit(void)
     return STATUS_SUCCESS;
 }
 
-static uint8_t box64_is_addr_in_jit(void* addr)
-{
-    if (!addr)
-        return FALSE;
-    return !!FindDynablockFromNativeAddress(addr);
-}
-
 NTSTATUS NTAPI NtReadVirtualMemory(HANDLE, PVOID, PVOID, SIZE_T, PSIZE_T);
 
 /* These reads must not turn an unreadable guest address into a nested fault. */
@@ -425,8 +420,38 @@ NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
     }
 
     /* Native JIT allocations are not limited to the 32-bit guest address space. */
-    if (!box64_is_addr_in_jit(native_pc))
+    dynablock_t* db = native_pc ? FindDynablockFromNativeAddress(native_pc) : NULL;
+    if (!db)
         return STATUS_SUCCESS;
+
+    /* Wine's saved state is from the last syscall, not the faulting instruction.
+     * Recover read faults before discarding the live JIT register context. */
+    if (emu && rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
+        rec->NumberParameters == 2 && rec->ExceptionInformation[0] == 0) {
+        WOW64_CPURESERVED* cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPURESERVED];
+        uintptr_t guest_pc = getX64Address(db, ctx->Pc);
+        if (cpu && guest_pc) {
+            WOW64_CONTEXT* guest = (WOW64_CONTEXT*)(cpu + 1);
+            for (unsigned i = 0; i < 16; ++i)
+                emu->regs[i].q[0] = ctx->X[xRAX + i];
+            R_RIP = guest_pc;
+            emu->eflags.x64 = ctx->X[xFlags];
+            adjust_arch(db, emu, ctx, guest_pc);
+            if (emu->df) UpdateFlags(emu);
+            guest->Eax = R_EAX;
+            guest->Ebx = R_EBX;
+            guest->Ecx = R_ECX;
+            guest->Edx = R_EDX;
+            guest->Esi = R_ESI;
+            guest->Edi = R_EDI;
+            guest->Ebp = R_EBP;
+            guest->Esp = R_ESP;
+            guest->Eip = R_RIP;
+            guest->EFlags = emu->eflags.x64;
+            box_to_fpu(guest, emu);
+            rec->ExceptionAddress = (void*)guest_pc;
+        }
+    }
 
     /* Replace the host context with one captured before JIT entry so host code can unwind */
     memcpy(ctx, NtCurrentTeb()->TlsSlots[WOW64_TLS_ENTRY_CONTEXT], sizeof(*ctx));

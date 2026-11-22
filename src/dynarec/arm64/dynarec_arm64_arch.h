@@ -18,7 +18,8 @@ void* populate_arch(dynarec_arm_t* dyn, void* p, size_t sz);
 //adjust flags and more
 void adjust_arch(dynablock_t* db, x64emu_t* emu, ucontext_t* p, uintptr_t x64pc);
 #else
-#define adjust_arch(db, emu, p, x64pc)
+#include <windows.h>
+void adjust_arch(dynablock_t* db, x64emu_t* emu, ARM64_NT_CONTEXT* p, uintptr_t x64pc);
 #endif
 // get if instruction can be regenerated for unaligned access
 int arch_unaligned(dynablock_t* db, uintptr_t x64pc);
