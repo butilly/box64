@@ -268,9 +268,17 @@ void* populate_arch(dynarec_arm_t* dyn, void* p, size_t tot_sz)
 // NZCV V
 #define NZCV_V      28
 
-#ifndef _WIN32 // TODO: Implemented this for Win32
+#ifdef _WIN32
+void adjust_arch(dynablock_t* db, x64emu_t* emu, ARM64_NT_CONTEXT* p, uintptr_t x64pc)
+#else
 void adjust_arch(dynablock_t* db, x64emu_t* emu, ucontext_t* p, uintptr_t x64pc)
+#endif
 {
+#ifdef _WIN32
+    uint32_t pstate = p->Cpsr;
+#else
+    uint32_t pstate = p->uc_mcontext.pstate;
+#endif
     if(!db->arch_size || !db->arch)
         return;
     int ninst = getX64AddressInst(db, x64pc);
@@ -312,25 +320,29 @@ void adjust_arch(dynablock_t* db, x64emu_t* emu, ucontext_t* p, uintptr_t x64pc)
             //return;
         }
         if(flags->nf) {
-            CONDITIONAL_SET_FLAG(p->uc_mcontext.pstate&(1<<NZCV_N), F_SF);
+            CONDITIONAL_SET_FLAG(pstate&(1<<NZCV_N), F_SF);
         }
         if(flags->vf) {
-            CONDITIONAL_SET_FLAG(p->uc_mcontext.pstate&(1<<NZCV_V), F_OF);
+            CONDITIONAL_SET_FLAG(pstate&(1<<NZCV_V), F_OF);
         }
         if(flags->eq) {
-            CONDITIONAL_SET_FLAG(p->uc_mcontext.pstate&(1<<NZCV_Z), F_ZF);
+            CONDITIONAL_SET_FLAG(pstate&(1<<NZCV_Z), F_ZF);
         }
         if(flags->cf) {
             if(flags->inv_cf) {
-                CONDITIONAL_SET_FLAG((p->uc_mcontext.pstate&(1<<NZCV_C))==0, F_CF);
+                CONDITIONAL_SET_FLAG((pstate&(1<<NZCV_C))==0, F_CF);
             } else {
-                CONDITIONAL_SET_FLAG(p->uc_mcontext.pstate&(1<<NZCV_C), F_CF);
+                CONDITIONAL_SET_FLAG(pstate&(1<<NZCV_C), F_CF);
             }
         }
         if(flags->pf_v) {
-            CONDITIONAL_SET_FLAG(p->uc_mcontext.pstate&(1<<NZCV_V), F_PF);
+            CONDITIONAL_SET_FLAG(pstate&(1<<NZCV_V), F_PF);
         }
     }
+#ifdef _WIN32
+    struct { __uint128_t vregs[32]; } vectors, *fpsimd = &vectors;
+    memcpy(vectors.vregs, p->V, sizeof(vectors.vregs));
+#else
     struct fpsimd_context *fpsimd = NULL;
     // find fpsimd struct
     {
@@ -342,6 +354,7 @@ void adjust_arch(dynablock_t* db, x64emu_t* emu, ucontext_t* p, uintptr_t x64pc)
                 ff = (struct _aarch64_ctx*)((uintptr_t)ff + ff->size);
         }
     }
+#endif
     if(sse) {
         dynarec_log_prefix(0, LOG_INFO, " sse[%x (fpsimd=%p)] ", sse->sse, fpsimd);
         for(int i=0; i<16; ++i)
@@ -398,7 +411,6 @@ void adjust_arch(dynablock_t* db, x64emu_t* emu, ucontext_t* p, uintptr_t x64pc)
     }
     dynarec_log_prefix(0, LOG_INFO, "\n");
 }
-#endif
 
 int arch_unaligned(dynablock_t* db, uintptr_t x64pc)
 {
