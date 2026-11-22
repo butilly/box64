@@ -314,12 +314,101 @@ static uint8_t box64_is_addr_in_jit(void* addr)
     return !!FindDynablockFromNativeAddress(addr);
 }
 
+NTSTATUS NTAPI NtReadVirtualMemory(HANDLE, PVOID, PVOID, SIZE_T, PSIZE_T);
+
+/* These reads must not turn an unreadable guest address into a nested fault. */
+static void log_fault_bytes(const char* label, uintptr_t address)
+{
+    unsigned char bytes[32] = {0};
+    char hex[sizeof(bytes) * 2 + 1];
+    static const char digits[] = "0123456789abcdef";
+    SIZE_T count = 0;
+    NTSTATUS status = NtReadVirtualMemory(NtCurrentProcess(), (void*)address,
+        bytes, sizeof(bytes), &count);
+    if (count > sizeof(bytes)) count = sizeof(bytes);
+    for (SIZE_T i = 0; i < count; ++i) {
+        hex[i * 2] = digits[bytes[i] >> 4];
+        hex[i * 2 + 1] = digits[bytes[i] & 15];
+    }
+    hex[count * 2] = 0;
+    printf_log(LOG_NONE, "WOW64 snapshot %s address=%p status=%08x bytes=%zu data=%s\n",
+        label, (void*)address, status, count, hex);
+}
+
+static void log_fault_context(CONTEXT* ctx)
+{
+    static LONG active;
+    if (InterlockedCompareExchange(&active, 1, 0)) return;
+
+    dynablock_t* db = FindDynablockFromNativeAddress((void*)(ULONG_PTR)ctx->Pc);
+    uintptr_t guest_pc = db ? getX64Address(db, ctx->Pc) : 0;
+    MEMORY_BASIC_INFORMATION info = {0};
+    char module[MAX_PATH] = {0};
+    NTSTATUS status = guest_pc ? NtQueryVirtualMemory(NtCurrentProcess(), (void*)guest_pc,
+        MemoryBasicInformation, &info, sizeof(info), NULL) : STATUS_INVALID_ADDRESS;
+    if (NT_SUCCESS(status) && info.Type == MEM_IMAGE)
+        GetModuleFileNameA((HMODULE)info.AllocationBase, module, sizeof(module));
+    printf_log(LOG_NONE, "WOW64 snapshot jit=%p mapped_guest_pc=%p query=%08x "
+        "guest_base=%p guest_offset=%llx state=%08x protect=%08x type=%08x module=%s\n",
+        db, (void*)guest_pc, status, info.AllocationBase,
+        NT_SUCCESS(status) ? (unsigned long long)(guest_pc - (uintptr_t)info.AllocationBase) : 0,
+        info.State, info.Protect, info.Type, module);
+
+    /* Raw host registers: x10..x17 are live guest GPRs only inside the JIT. */
+    for (unsigned i = 0; i < 28; i += 4)
+        printf_log(LOG_NONE, "WOW64 snapshot host x%u=%llx x%u=%llx x%u=%llx x%u=%llx\n",
+            i, (unsigned long long)ctx->X[i], i + 1, (unsigned long long)ctx->X[i + 1],
+            i + 2, (unsigned long long)ctx->X[i + 2], i + 3, (unsigned long long)ctx->X[i + 3]);
+    printf_log(LOG_NONE, "WOW64 snapshot host sp=%llx fp=%llx lr=%llx saved_sp=%llx cpsr=%08x\n",
+        (unsigned long long)ctx->Sp, (unsigned long long)ctx->Fp,
+        (unsigned long long)ctx->Lr, (unsigned long long)ctx->X28, ctx->Cpsr);
+
+    WOW64_CPURESERVED* cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPURESERVED];
+    WOW64_CONTEXT guest = {0};
+    SIZE_T count = 0;
+    status = cpu ? NtReadVirtualMemory(NtCurrentProcess(), cpu + 1,
+        &guest, sizeof(guest), &count) : STATUS_INVALID_ADDRESS;
+    if (NT_SUCCESS(status) && count == sizeof(guest))
+        printf_log(LOG_NONE, "WOW64 snapshot wine eip=%08x esp=%08x eax=%08x ebx=%08x "
+            "ecx=%08x edx=%08x esi=%08x edi=%08x ebp=%08x flags=%08x\n",
+            guest.Eip, guest.Esp, guest.Eax, guest.Ebx, guest.Ecx, guest.Edx,
+            guest.Esi, guest.Edi, guest.Ebp, guest.EFlags);
+    else
+        printf_log(LOG_NONE, "WOW64 snapshot wine status=%08x bytes=%zu\n", status, count);
+
+    log_fault_bytes("native-code", ctx->Pc);
+    if (guest_pc) log_fault_bytes("guest-code", guest_pc);
+    if (db && ctx->X14 <= 0xffffffffULL)
+        log_fault_bytes("guest-stack", ctx->X14);
+    InterlockedExchange(&active, 0);
+}
+
 NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
 {
     printf_log(LOG_DEBUG, "BTCpuResetToConsistentState(%p)\n", ptrs);
     x64emu_t* emu = NtCurrentTeb()->TlsSlots[WOW64_TLS_EMU];
     EXCEPTION_RECORD* rec = ptrs->ExceptionRecord;
     CONTEXT* ctx = ptrs->ContextRecord;
+    void* native_pc = (void*)(ULONG_PTR)ctx->Pc;
+    static LONG fault_log_count;
+
+    /* The normal signal diagnostics are not used by the WOW64 frontend. */
+    if (fault_log_count < 8 && InterlockedIncrement(&fault_log_count) <= 8) {
+        MEMORY_BASIC_INFORMATION info = {0};
+        NTSTATUS status = NtQueryVirtualMemory(NtCurrentProcess(), native_pc,
+            MemoryBasicInformation, &info, sizeof(info), NULL);
+        printf_log(LOG_NONE, "WOW64 fault code=%08x native_pc=%p exception_addr=%p "
+            "cached_guest_pc=%p access=%llu address=%p query=%08x "
+            "allocation=%p offset=%llx state=%08x protect=%08x entry_context=%p\n",
+            rec->ExceptionCode, native_pc, rec->ExceptionAddress,
+            emu ? (void*)(uintptr_t)R_RIP : NULL,
+            rec->NumberParameters >= 1 ? (unsigned long long)rec->ExceptionInformation[0] : 0,
+            rec->NumberParameters >= 2 ? (void*)(ULONG_PTR)rec->ExceptionInformation[1] : NULL,
+            status, info.AllocationBase,
+            NT_SUCCESS(status) ? (unsigned long long)((ULONG_PTR)native_pc - (ULONG_PTR)info.AllocationBase) : 0,
+            info.State, info.Protect, NtCurrentTeb()->TlsSlots[WOW64_TLS_ENTRY_CONTEXT]);
+        log_fault_context(ctx);
+    }
 
     if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
         dynablock_t* db = NULL;
@@ -335,7 +424,8 @@ NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
         }
     }
 
-    if (!box64_is_addr_in_jit(ULongToPtr(ctx->Pc)))
+    /* Native JIT allocations are not limited to the 32-bit guest address space. */
+    if (!box64_is_addr_in_jit(native_pc))
         return STATUS_SUCCESS;
 
     /* Replace the host context with one captured before JIT entry so host code can unwind */
