@@ -421,7 +421,20 @@ NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
 
     /* Native JIT allocations are not limited to the 32-bit guest address space. */
     dynablock_t* db = native_pc ? FindDynablockFromNativeAddress(native_pc) : NULL;
-    if (!db)
+    /* A rejected entry block falls back to Run, whose first opcode load can
+     * fault too. Identify that function through its unwind entry, not a build-
+     * specific DLL offset, and do not interpret C registers as JIT registers. */
+    int interpreter_fetch = 0;
+    if (!db && emu && rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
+        rec->NumberParameters == 2 && rec->ExceptionInformation[0] == 0 &&
+        rec->ExceptionInformation[1] == R_RIP && emu->old_ip == R_RIP) {
+        DWORD64 fault_base = 0, run_base = 0;
+        PRUNTIME_FUNCTION fault_fn = RtlLookupFunctionEntry(ctx->Pc, &fault_base, NULL);
+        PRUNTIME_FUNCTION run_fn = RtlLookupFunctionEntry((DWORD64)(ULONG_PTR)Run, &run_base, NULL);
+        interpreter_fetch = fault_fn && run_fn && fault_base == run_base &&
+            fault_fn->BeginAddress == run_fn->BeginAddress;
+    }
+    if (!db && !interpreter_fetch)
         return STATUS_SUCCESS;
 
     /* Wine's saved state is from the last syscall, not the faulting instruction.
@@ -429,14 +442,16 @@ NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
     if (emu && rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
         rec->NumberParameters == 2 && rec->ExceptionInformation[0] == 0) {
         WOW64_CPURESERVED* cpu = NtCurrentTeb()->TlsSlots[WOW64_TLS_CPURESERVED];
-        uintptr_t guest_pc = getX64Address(db, ctx->Pc);
-        if (cpu && guest_pc) {
+        uintptr_t guest_pc = interpreter_fetch ? R_RIP : getX64Address(db, ctx->Pc);
+        if (cpu && (guest_pc || interpreter_fetch)) {
             WOW64_CONTEXT* guest = (WOW64_CONTEXT*)(cpu + 1);
-            for (unsigned i = 0; i < 16; ++i)
-                emu->regs[i].q[0] = ctx->X[xRAX + i];
-            R_RIP = guest_pc;
-            emu->eflags.x64 = ctx->X[xFlags];
-            adjust_arch(db, emu, ctx, guest_pc);
+            if (!interpreter_fetch) {
+                for (unsigned i = 0; i < 16; ++i)
+                    emu->regs[i].q[0] = ctx->X[xRAX + i];
+                R_RIP = guest_pc;
+                emu->eflags.x64 = ctx->X[xFlags];
+                adjust_arch(db, emu, ctx, guest_pc);
+            }
             if (emu->df) UpdateFlags(emu);
             guest->Eax = R_EAX;
             guest->Ebx = R_EBX;
@@ -450,6 +465,14 @@ NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
             guest->EFlags = emu->eflags.x64;
             box_to_fpu(guest, emu);
             rec->ExceptionAddress = (void*)guest_pc;
+            if (interpreter_fetch) {
+                /* The host read was an x86 instruction fetch, not a data read. */
+                rec->ExceptionInformation[0] = 8;
+                static LONG fetch_reports;
+                if (InterlockedIncrement(&fetch_reports) <= 8)
+                    printf_log(LOG_NONE, "WOW64 interpreter fetch delivered eip=%08x esp=%08x\n",
+                        guest->Eip, guest->Esp);
+            }
         }
     }
 
