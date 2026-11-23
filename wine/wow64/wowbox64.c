@@ -114,6 +114,92 @@ cpu_ext_t cpuext = {0};
 static box64context_t box64_context;
 box64context_t* my_context = &box64_context;
 
+NTSTATUS NTAPI NtReadVirtualMemory(HANDLE, PVOID, PVOID, SIZE_T, PSIZE_T);
+
+/* Bounded replacement for the full virtual-memory trace in the affected game.
+ * These are notification snapshots, not proof that the operation succeeded. */
+static int memory_history_enabled;
+static LONG memory_history_lock;
+static unsigned memory_history_next, memory_history_count;
+static LONG memory_history_skipped, memory_history_reports;
+static unsigned memory_history_overwritten;
+static struct memory_event {
+    const char* operation;
+    void* address;
+    SIZE_T size;
+    ULONG flags;
+    NTSTATUS query;
+    MEMORY_BASIC_INFORMATION info;
+    DWORD tid, eip, esp, stack[8];
+    NTSTATUS stack_status;
+    SIZE_T stack_bytes;
+} memory_history[256];
+
+static void record_memory_event(const char* operation, void* address, SIZE_T size, ULONG flags)
+{
+    if (!memory_history_enabled || (ULONG_PTR)address > 0xffffffffULL) return;
+    if (InterlockedCompareExchange(&memory_history_lock, 1, 0)) {
+        InterlockedIncrement(&memory_history_skipped);
+        return;
+    }
+    struct memory_event* event = &memory_history[memory_history_next];
+    memset(event, 0, sizeof(*event));
+    event->operation = operation;
+    event->address = address;
+    event->size = size;
+    event->flags = flags;
+    event->tid = GetTID();
+    event->query = NtQueryVirtualMemory(NtCurrentProcess(), address,
+        MemoryBasicInformation, &event->info, sizeof(event->info), NULL);
+    x64emu_t* emu = NtCurrentTeb()->TlsSlots[WOW64_TLS_EMU];
+    if (emu) {
+        event->eip = R_RIP;
+        event->esp = R_ESP;
+        event->stack_status = NtReadVirtualMemory(NtCurrentProcess(), ULongToPtr(R_ESP),
+            event->stack, sizeof(event->stack), &event->stack_bytes);
+    }
+    memory_history_next = (memory_history_next + 1) % 256;
+    if (memory_history_count < 256) ++memory_history_count;
+    else ++memory_history_overwritten;
+    InterlockedExchange(&memory_history_lock, 0);
+}
+
+static void log_memory_history(uintptr_t target)
+{
+    if (!memory_history_enabled || InterlockedIncrement(&memory_history_reports) > 2) return;
+    if (InterlockedCompareExchange(&memory_history_lock, 1, 0)) {
+        printf_log(LOG_NONE, "WOW64-LIFETIME target=%p history busy\n", (void*)target);
+        return;
+    }
+    unsigned matches = 0;
+    printf_log(LOG_NONE, "WOW64-LIFETIME target=%p retained=%u overwritten=%u skipped=%ld newest-first\n",
+        (void*)target, memory_history_count, memory_history_overwritten, memory_history_skipped);
+    for (unsigned i = 0; i < memory_history_count && matches < 16; ++i) {
+        const struct memory_event* event = &memory_history[(memory_history_next + 255 - i) % 256];
+        uintptr_t base = (uintptr_t)event->address;
+        SIZE_T size = event->size;
+        if (!size && NT_SUCCESS(event->query)) {
+            base = (uintptr_t)event->info.AllocationBase;
+            if (!base) base = (uintptr_t)event->info.BaseAddress;
+            size = (uintptr_t)event->info.BaseAddress - base + event->info.RegionSize;
+        }
+        if (target < base || target - base >= size) continue;
+        ++matches;
+        printf_log(LOG_NONE, "WOW64-LIFETIME age=%u op=%s addr=%p size=%zu flags=%08lx "
+            "query=%08x allocation=%p region=%p region_size=%zu state=%08lx protect=%08lx "
+            "tid=%04lx eip=%08lx esp=%08lx stack_status=%08x stack_bytes=%zu "
+            "stack=%08lx,%08lx,%08lx,%08lx,%08lx,%08lx,%08lx,%08lx\n",
+            i, event->operation, event->address, event->size, event->flags,
+            event->query, event->info.AllocationBase, event->info.BaseAddress,
+            event->info.RegionSize, event->info.State, event->info.Protect,
+            event->tid, event->eip, event->esp, event->stack_status, event->stack_bytes,
+            event->stack[0], event->stack[1], event->stack[2], event->stack[3],
+            event->stack[4], event->stack[5], event->stack[6], event->stack[7]);
+    }
+    printf_log(LOG_NONE, "WOW64-LIFETIME matches=%u (notification ranges only)\n", matches);
+    InterlockedExchange(&memory_history_lock, 0);
+}
+
 
 void fpu_to_box(WOW64_CONTEXT* ctx, x64emu_t* emu)
 {
@@ -224,6 +310,7 @@ void WINAPI BTCpuNotifyMemoryDirty(PVOID addr, SIZE_T size)
 void WINAPI BTCpuNotifyMemoryFree(PVOID addr, SIZE_T size, ULONG free_type)
 {
     printf_log(LOG_DEBUG, "BTCpuNotifyMemoryFree(%p, %zu, %u)\n", addr, size, free_type);
+    record_memory_event("free", addr, size, free_type);
     if (!size)
         invalidate_mapped_section(addr);
     else if (free_type & MEM_DECOMMIT)
@@ -233,6 +320,7 @@ void WINAPI BTCpuNotifyMemoryFree(PVOID addr, SIZE_T size, ULONG free_type)
 void WINAPI BTCpuNotifyMemoryProtect(PVOID addr, SIZE_T size, DWORD new_protect)
 {
     printf_log(LOG_DEBUG, "BTCpuNotifyMemoryProtect(%p, %zu, %08x)\n", addr, size, new_protect);
+    record_memory_event("protect", addr, size, new_protect);
     if (!(new_protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)))
         return;
     unprotectDB((uintptr_t)addr, size, 1);
@@ -241,6 +329,7 @@ void WINAPI BTCpuNotifyMemoryProtect(PVOID addr, SIZE_T size, DWORD new_protect)
 void WINAPI BTCpuNotifyUnmapViewOfSection(PVOID addr, ULONG flags)
 {
     printf_log(LOG_DEBUG, "BTCpuNotifyUnmapViewOfSection(%p, %u)\n", addr, flags);
+    record_memory_event("unmap", addr, 0, flags);
     invalidate_mapped_section(addr);
 }
 
@@ -274,6 +363,9 @@ NTSTATUS WINAPI BTCpuProcessInit(void)
         if (shortname) {
             shortname++;
             ApplyEnvFileEntry(shortname);
+            memory_history_enabled = !_stricmp(shortname, "GOF2.exe");
+            if (memory_history_enabled)
+                printf_log(LOG_NONE, "WOW64-LIFETIME bounded memory notification history enabled\n");
         }
     }
 
@@ -308,8 +400,6 @@ NTSTATUS WINAPI BTCpuProcessInit(void)
 
     return STATUS_SUCCESS;
 }
-
-NTSTATUS NTAPI NtReadVirtualMemory(HANDLE, PVOID, PVOID, SIZE_T, PSIZE_T);
 
 /* These reads must not turn an unreadable guest address into a nested fault. */
 static void log_fault_bytes(const char* label, uintptr_t address)
@@ -466,6 +556,12 @@ NTSTATUS WINAPI BTCpuResetToConsistentState(EXCEPTION_POINTERS* ptrs)
             box_to_fpu(guest, emu);
             rec->ExceptionAddress = (void*)guest_pc;
             if (interpreter_fetch) {
+                log_memory_history(guest_pc);
+                static LONG fetch_stack_reports;
+                if (InterlockedIncrement(&fetch_stack_reports) <= 2) {
+                    log_fault_bytes("fetch-stack", R_ESP);
+                    log_fault_bytes("fetch-frame", R_EBP);
+                }
                 /* The host read was an x86 instruction fetch, not a data read. */
                 rec->ExceptionInformation[0] = 8;
                 static LONG fetch_reports;
