@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -136,6 +135,7 @@ int fpu_get_reg_ymm(dynarec_la64_t* dyn, int t, int ymm)
 // Reset fpu regs counter
 static void fpu_reset_reg_lsxcache(lsxcache_t* lsx)
 {
+    lsx->upper_clear_pending = 0;
     for (int i = 0; i < 24; ++i) {
         lsx->fpuused[i] = 0;
         lsx->lsxcache[i].v = 0;
@@ -145,6 +145,7 @@ static void fpu_reset_reg_lsxcache(lsxcache_t* lsx)
 void fpu_reset_reg(dynarec_la64_t* dyn)
 {
     fpu_reset_reg_lsxcache(&dyn->lsx);
+    for (int i = 0; i < 24; ++i) dyn->lsx.olds[i].v = 0;
 }
 
 
@@ -436,6 +437,10 @@ void lsxcacheUnwind(lsxcache_t* cache)
                 cache->lsxcache[i].v = 0;
         cache->news = 0;
     }
+    // restore the entries this opcode changed or removed
+    for (int i = 0; i < 24; ++i)
+        if (cache->olds[i].v)
+            cache->lsxcache[i] = cache->olds[i];
     if (cache->stack_push) {
         // unpush
         for (int j = 0; j < 24; ++j) {
@@ -629,7 +634,7 @@ void inst_name_pass3(dynarec_native_t* dyn, int ninst, const char* name, rex_t r
     }
     if (!dyn->need_dump && !BOX64ENV(dynarec_gdbjit) && !BOX64ENV(dynarec_perf_map)) return;
 
-    static char buf[4096];
+    static __thread char buf[4096];
     int length = sprintf(buf, "barrier=%d state=%d/%s(%s->%s), set=%X/%X, use=%X, need=%X/%X, fuse=%d/%d, sm=%d(%d/%d)",
         dyn->insts[ninst].x64.barrier,
         dyn->insts[ninst].x64.state_flags,
@@ -688,10 +693,10 @@ void inst_name_pass3(dynarec_native_t* dyn, int ninst, const char* name, rex_t r
             (void*)(dyn->native_start + dyn->insts[ninst].address), dyn->insts[ninst].size / 4, ninst, buf, (dyn->need_dump > 1) ? "\e[m" : "");
     }
     if (BOX64ENV(dynarec_gdbjit)) {
-        static char buf2[512];
+        static __thread char buf2[4096 + 64];
         if (BOX64ENV(dynarec_gdbjit) > 1) {
-            sprintf(buf2, "; %d: %d opcodes, %s", ninst, dyn->insts[ninst].size / 4, buf);
-            dyn->gdbjit_block = GdbJITBlockAddLine(dyn->gdbjit_block, (dyn->native_start + dyn->insts[ninst].address), buf2);
+            snprintf(buf2, sizeof(buf2), "; %d: %d opcodes, %.*s", ninst, dyn->insts[ninst].size / 4, (int)sizeof(buf2) - 64, buf);
+            GdbJITBlockAddText(dyn->gdbjit_block, buf2);
         }
         zydis_dec_t* dec = rex.is32bits ? my_context->dec32 : my_context->dec;
         const char* inst_name = name;
@@ -1123,29 +1128,34 @@ static int tryApplyPreloadCache(dynarec_la64_t* dyn, int first, int last, int re
 
     lsx_cache_t first_cache = dyn->insts[first_use].lsx.lsxcache[reg];
     if (first_cache.n != reg) return 0;
+    int dirty = 0;
     if (ymm) {
         if (first_cache.t != LSX_CACHE_YMMR && first_cache.t != LSX_CACHE_YMMW)
             return 0;
+        dirty = first_cache.t == LSX_CACHE_YMMW;
     } else if (first_cache.t != LSX_CACHE_XMMR && first_cache.t != LSX_CACHE_XMMW) {
         return 0;
+    } else {
+        dirty = first_cache.t == LSX_CACHE_XMMW;
     }
 
     for (int i = first; i < first_use; ++i) {
         lsxcache_t* cache = &dyn->insts[i].lsx;
-        cache->lsxcache[reg].t = ymm ? LSX_CACHE_YMMR : LSX_CACHE_XMMR;
+        cache->lsxcache[reg].t = ymm ? (dirty ? LSX_CACHE_YMMW : LSX_CACHE_YMMR) : (dirty ? LSX_CACHE_XMMW : LSX_CACHE_XMMR);
         cache->lsxcache[reg].n = reg;
         cache->fpuused[reg] = 1;
         cache->news &= ~(1u << reg);
+        cache->olds[reg].v = 0;
         if (ymm) {
             cache->ssecache[reg].v = -1;
             cache->avxcache[reg].reg = reg;
             cache->avxcache[reg].upper_zero_pending = 0;
-            cache->avxcache[reg].write = 0;
+            cache->avxcache[reg].write = dirty;
             if (!cache->avxcache[reg].v) cache->avxcache[reg].write = 1;
         } else {
             cache->avxcache[reg].v = -1;
             cache->ssecache[reg].reg = reg;
-            cache->ssecache[reg].write = 0;
+            cache->ssecache[reg].write = dirty;
             if (!cache->ssecache[reg].v) cache->ssecache[reg].write = 1;
         }
     }
@@ -1181,6 +1191,7 @@ static void addSSEPreload(dynarec_la64_t* dyn, int last, int first, uint32_t pre
 
 void updatePreloads(dynarec_la64_t* dyn)
 {
+    propagate_nodf(dyn);
     if (!dyn->use_xmm && !dyn->use_ymm)
         return;
     for (int first = 0; first < dyn->size; ++first) {

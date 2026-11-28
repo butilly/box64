@@ -65,6 +65,9 @@ int setJumpTableIfRef64(void* addr, void* jmp, void* ref); // return 1 if write 
 void setJumpTableDefault64(void* addr);
 int setJumpTableDefaultIfRef64(void* addr, void* jmp);
 void setJumpTableDefaultRef64(void* addr, void* jmp);
+#ifdef BOX64EC
+void setJumpTableDefaultRangeRef64(uintptr_t addr, size_t size, void* jmp, void* other_jmp);
+#endif
 int isJumpTableDefault64(void* addr);
 uintptr_t getJumpTable64(void);
 uintptr_t getJumpTable48(void);
@@ -124,6 +127,8 @@ uintptr_t getJumpAddress64(uintptr_t addr);
 void updateProtection(uintptr_t addr, size_t size, uint32_t prot);
 void setProtection(uintptr_t addr, size_t size, uint32_t prot);
 void setProtection_mmap(uintptr_t addr, size_t size, uint32_t prot);
+void setProtection_guest(uintptr_t addr, size_t size, uint32_t prot);
+void setProtection_flag(uintptr_t addr, size_t size, uint32_t prot, uint32_t flag);
 void setProtection_box(uintptr_t addr, size_t size, uint32_t prot);
 void setProtection_stack(uintptr_t addr, size_t size, uint32_t prot);
 void setProtection_elf(uintptr_t addr, size_t size, uint32_t prot);
@@ -136,8 +141,14 @@ void updateDBHostProtectionForGuestRange(uintptr_t addr, size_t size);
 uint32_t getProtection(uintptr_t addr);
 uint32_t getProtection_fast(uintptr_t addr);
 int getMmapped(uintptr_t addr);
+int isGuestHeap(uintptr_t addr);
 int getMAllocated(uintptr_t addr);
 int memExist(uintptr_t addr);
+
+int guest_brk_is_active(void);
+int guest_brk_set(uintptr_t addr, uintptr_t* ret);
+uintptr_t guest_syscall_brk(uintptr_t addr);
+void* guest_sbrk(intptr_t inc);
 void loadProtectionFromMap(void);
 #ifdef DYNAREC
 void protectDB(uintptr_t addr, size_t size);
@@ -145,6 +156,9 @@ void protectDBJumpTable(uintptr_t addr, size_t size, void* jump, void* ref);
 void unprotectDB(uintptr_t addr, size_t size, int mark);    // if mark==0, the blocks are not marked as potentially dirty
 void neverprotectDB(uintptr_t addr, size_t size, int mark);
 int isprotectedDB(uintptr_t addr, size_t size);
+#ifdef BOX64EC
+uint32_t getUnprotectGeneration(void);
+#endif
 #endif
 void* find32bitBlock(size_t size);
 void* find31bitBlockNearHint(void* hint, size_t size, uintptr_t mask);

@@ -111,9 +111,8 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
             GETVX();
             GETGY();
             GETVY();
-            LUI(x6, 0xFFFF8); // -32768
-            LUI(x7, 0x8);     // 32768
-            ADDIW(x7, x7, -1);
+            MOV64x(x6, -32768);
+            MOV32w(x7, 0x7FFF);
             if (gd == ed) {
                 ADDI(x5, xEmu, offsetof(x64emu_t, scratch));
                 LD(x3, wback, fixedaddress + 0);
@@ -260,9 +259,8 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
             GETVX();
             GETGY();
             GETVY();
-            LUI(x6, 0xFFFF8); // -32768
-            LUI(x7, 0x8);     // 32768
-            ADDIW(x7, x7, -1);
+            MOV64x(x6, -32768);
+            MOV32w(x7, 0x7FFF);
             for (int i = 0; i < 8; ++i) {
                 LBU(x3, vback, vxoffset + i * 2);
                 LB(x4, wback, fixedaddress + i * 2);
@@ -302,9 +300,8 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
             GETVX();
             GETGY();
             GETVY();
-            LUI(x6, 0xFFFF8); // -32768
-            LUI(x7, 0x8);     // 32768
-            ADDIW(x7, x7, -1);
+            MOV64x(x6, -32768);
+            MOV32w(x7, 0x7FFF);
             if (gd == ed) {
                 ADDI(x5, xEmu, offsetof(x64emu_t, scratch));
                 LD(x3, wback, fixedaddress + 0);
@@ -585,8 +582,7 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
             for (int i = 0; i < 4; ++i) {
                 LWU(x4, xEmu, offsetof(x64emu_t, scratch) + 16 + 4 * i);
                 ANDI(x4, x4, 3);
-                SLLI(x4, x4, 2);
-                ADD(x4, x4, xEmu);
+                ADDSL(x4, xEmu, x4, 2, x4);
                 LWU(x5, x4, offsetof(x64emu_t, scratch) + 0);
                 SW(x5, gback, gdoffset + 4 * i);
             }
@@ -604,8 +600,7 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
                 for (int i = 0; i < 4; ++i) {
                     LWU(x4, xEmu, offsetof(x64emu_t, scratch) + 16 + 4 * i);
                     ANDI(x4, x4, 3);
-                    SLLI(x4, x4, 2);
-                    ADD(x4, x4, xEmu);
+                    ADDSL(x4, xEmu, x4, 2, x4);
                     LWU(x5, x4, offsetof(x64emu_t, scratch) + 0);
                     SW(x5, gback, gyoffset + 4 * i);
                 }
@@ -631,8 +626,7 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
                 LD(x4, xEmu, offsetof(x64emu_t, scratch) + 16 + 8 * i);
                 SRLI(x4, x4, 1);
                 ANDI(x4, x4, 1);
-                SLLI(x4, x4, 3);
-                ADD(x4, x4, xEmu);
+                ADDSL(x4, xEmu, x4, 3, x4);
                 LD(x5, x4, offsetof(x64emu_t, scratch) + 0);
                 SD(x5, gback, gdoffset + 8 * i);
             }
@@ -651,8 +645,7 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
                     LD(x4, xEmu, offsetof(x64emu_t, scratch) + 16 + 8 * i);
                     SRLI(x4, x4, 1);
                     ANDI(x4, x4, 1);
-                    SLLI(x4, x4, 3);
-                    ADD(x4, x4, xEmu);
+                    ADDSL(x4, xEmu, x4, 3, x4);
                     LD(x5, x4, offsetof(x64emu_t, scratch) + 0);
                     SD(x5, gback, gyoffset + 8 * i);
                 }
@@ -666,8 +659,8 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
             GETGY();
             if (MODREG) {
                 ed = (nextop & 7) + (rex.b << 3);
-                sse_forget_reg(dyn, ninst, x3, ed);
-                ADDI(x3, xEmu, offsetof(x64emu_t, xmm[ed]));
+                simd_forget_fp_reg(dyn, ninst, x3, ed);
+                ADDI(x3, xEmu, XMMOFF(ed));
             } else {
                 SMREAD();
                 addr = geted(dyn, addr, ninst, nextop, &wback, x2, x1, &fixedaddress, rex, NULL, 0, 0);
@@ -703,8 +696,8 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
                 LD(x4, wback, fixedaddress + 8);
                 SD(x3, x6, 0);
                 SD(x4, x6, 8);
-                LD(x3, wback, fixedaddress + offsetof(x64emu_t, ymm) - offsetof(x64emu_t, xmm));
-                LD(x4, wback, fixedaddress + offsetof(x64emu_t, ymm) - offsetof(x64emu_t, xmm) + 8);
+                LD(x3, wback, YMMOFF(ed));
+                LD(x4, wback, YMMOFF(ed) + 8);
                 SD(x3, x6, 16);
                 SD(x4, x6, 24);
                 wback = x6;
@@ -727,16 +720,14 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
             for (int i = 0; i < 4; ++i) {
                 LWU(x3, vback, vxoffset + 4 * i);
                 ANDI(x3, x3, 7);
-                SLLI(x3, x3, 2);
-                ADD(x4, wback, x3);
+                ADDSL(x4, wback, x3, 2, x3);
                 LWU(x5, x4, fixedaddress);
                 SW(x5, gback, gdoffset + 4 * i);
             }
             for (int i = 0; i < 4; ++i) {
                 LWU(x3, vback, vyoffset + 4 * i);
                 ANDI(x3, x3, 7);
-                SLLI(x3, x3, 2);
-                ADD(x4, wback, x3);
+                ADDSL(x4, wback, x3, 2, x3);
                 LWU(x5, x4, fixedaddress);
                 SW(x5, gback, gyoffset + 4 * i);
             }
@@ -1232,8 +1223,7 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
             GETEX(x2, 0, vex.l ? 28 : 12);
             GETGX();
             GETGY();
-            LUI(x5, 0x10); // 65536
-            ADDIW(x5, x5, -1);
+            MOV32w(x5, 0xFFFF);
             if (MODREG && ed == vex.v) {
                 for (int i = 0; i < 4; ++i) {
                     LW(x3, vback, vxoffset + i * 4);
@@ -1297,6 +1287,62 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
                         SATUw(x3, x5);
                         SH(x3, gback, gyoffset + 8 + i * 2);
                     }
+                }
+            } else
+                YMM0(gd);
+            break;
+        case 0x2C:
+            INST_NAME("VMASKMOVPS Gx, Vx, Ex");
+            nextop = F8;
+            if (MODREG) return 0;
+            addr = geted(dyn, addr, ninst, nextop, &wback, x2, x1, &fixedaddress, rex, NULL, vex.l ? 28 : 12, 0);
+            GETVX();
+            GETVY();
+            GETGX();
+            GETGY();
+            for (int i = 0; i < 4; ++i) {
+                ADDI(x3, xZR, 0);
+                LW(x4, vback, vxoffset + 4 * i);
+                BGE(x4, xZR, 8);
+                LWU(x3, wback, fixedaddress + 4 * i);
+                SW(x3, gback, gdoffset + 4 * i);
+            }
+            if (vex.l) {
+                GETEY();
+                for (int i = 0; i < 4; ++i) {
+                    ADDI(x3, xZR, 0);
+                    LW(x4, vback, vyoffset + 4 * i);
+                    BGE(x4, xZR, 8);
+                    LWU(x3, wback, fixedaddress + 4 * i);
+                    SW(x3, gback, gyoffset + 4 * i);
+                }
+            } else
+                YMM0(gd);
+            break;
+        case 0x2D:
+            INST_NAME("VMASKMOVPD Gx, Vx, Ex");
+            nextop = F8;
+            if (MODREG) return 0;
+            addr = geted(dyn, addr, ninst, nextop, &wback, x2, x1, &fixedaddress, rex, NULL, vex.l ? 24 : 8, 0);
+            GETVX();
+            GETVY();
+            GETGX();
+            GETGY();
+            for (int i = 0; i < 2; ++i) {
+                ADDI(x3, xZR, 0);
+                LD(x4, vback, vxoffset + 8 * i);
+                BGE(x4, xZR, 8);
+                LD(x3, wback, fixedaddress + 8 * i);
+                SD(x3, gback, gdoffset + 8 * i);
+            }
+            if (vex.l) {
+                GETEY();
+                for (int i = 0; i < 2; ++i) {
+                    ADDI(x3, xZR, 0);
+                    LD(x4, vback, vyoffset + 8 * i);
+                    BGE(x4, xZR, 8);
+                    LD(x3, wback, fixedaddress + 8 * i);
+                    SD(x3, gback, gyoffset + 8 * i);
                 }
             } else
                 YMM0(gd);
@@ -1450,8 +1496,8 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
                 LD(x4, wback, fixedaddress + 8);
                 SD(x3, x6, 0);
                 SD(x4, x6, 8);
-                LD(x3, wback, fixedaddress + offsetof(x64emu_t, ymm) - offsetof(x64emu_t, xmm));
-                LD(x4, wback, fixedaddress + offsetof(x64emu_t, ymm) - offsetof(x64emu_t, xmm) + 8);
+                LD(x3, wback, YMMOFF(ed));
+                LD(x4, wback, YMMOFF(ed) + 8);
                 SD(x3, x6, 16);
                 SD(x4, x6, 24);
                 wback = x6;
@@ -1474,16 +1520,14 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
             for (int i = 0; i < 4; ++i) {
                 LWU(x3, vback, vxoffset + 4 * i);
                 ANDI(x3, x3, 7);
-                SLLI(x3, x3, 2);
-                ADD(x4, wback, x3);
+                ADDSL(x4, wback, x3, 2, x3);
                 LWU(x5, x4, fixedaddress);
                 SW(x5, gback, gdoffset + 4 * i);
             }
             for (int i = 0; i < 4; ++i) {
                 LWU(x3, vback, vyoffset + 4 * i);
                 ANDI(x3, x3, 7);
-                SLLI(x3, x3, 2);
-                ADD(x4, wback, x3);
+                ADDSL(x4, wback, x3, 2, x3);
                 LWU(x5, x4, fixedaddress);
                 SW(x5, gback, gyoffset + 4 * i);
             }
@@ -1492,7 +1536,7 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
             INST_NAME("VPMINSB Gx, Vx, Ex");
             nextop = F8;
             GETGX();
-            GETEX(x2, 0, vex.l ? 28 : 12);
+            GETEX(x2, 0, vex.l ? 31 : 15);
             GETVX();
             GETGY();
             GETVY();
@@ -1562,7 +1606,7 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
             INST_NAME("VPMINUW Gx, Vx, Ex");
             nextop = F8;
             GETGX();
-            GETEX(x2, 0, vex.l ? 28 : 12);
+            GETEX(x2, 0, vex.l ? 30 : 14);
             GETVX();
             GETGY();
             GETVY();
@@ -1632,7 +1676,7 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
             INST_NAME("VPMAXSB Gx, Vx, Ex");
             nextop = F8;
             GETGX();
-            GETEX(x2, 0, vex.l ? 28 : 12);
+            GETEX(x2, 0, vex.l ? 31 : 15);
             GETVX();
             GETGY();
             GETVY();
@@ -1702,7 +1746,7 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
             INST_NAME("VPMAXUW Gx, Vx, Ex");
             nextop = F8;
             GETGX();
-            GETEX(x2, 0, vex.l ? 28 : 12);
+            GETEX(x2, 0, vex.l ? 30 : 14);
             GETVX();
             GETGY();
             GETVY();
@@ -1826,7 +1870,7 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
             nextop = F8;
             GETEX(x2, 0, 14);
             GETGX();
-            ADDI(x6, xZR, 0xffff);
+            MOV32w(x6, 0xffff);
             ADDI(x7, xZR, 0);
             for (int i = 0; i < 8; ++i) {
                 LHU(x3, wback, fixedaddress + 2 * i);
@@ -2194,21 +2238,21 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
         case 0xDC:
             INST_NAME("VAESENC Gx, Vx, Ex");
             nextop = F8;
-            if (cpuext.zvkned && (!vex.l || cpuext.vlen >= 32)) {
+            if (cpuext.zvkned && cpuext.vlen >= 32) {
                 gd = ((nextop & 0x38) >> 3) + (rex.r << 3);
                 SET_AVX_VECTOR_WIDTH(x1, VECTOR_SEW32);
-                v0 = fpu_get_scratch(dyn);
-                avx_load_reg_vector(dyn, ninst, x1, v0, vex.v, 16 << vex.l, VECTOR_SEW32);
-                v1 = fpu_get_scratch(dyn);
+                v0 = vpu_get_scratch(dyn);
+                simd_load_reg(dyn, ninst, x1, v0, vex.v, 16 << vex.l, VECTOR_SEW32);
+                v1 = vpu_get_scratch(dyn);
                 if (MODREG) {
-                    avx_load_reg_vector(dyn, ninst, x1, v1, (nextop & 7) + (rex.b << 3), 16 << vex.l, VECTOR_SEW32);
+                    simd_load_reg(dyn, ninst, x1, v1, (nextop & 7) + (rex.b << 3), 16 << vex.l, VECTOR_SEW32);
                 } else {
                     SMREAD();
                     addr = geted(dyn, addr, ninst, nextop, &ed, x3, x2, &fixedaddress, rex, NULL, 0, 0);
                     VLE32_V(v1, ed, VECTOR_UNMASKED, VECTOR_NFIELD1);
                 }
                 VAESEM_VV(v0, v1);
-                avx_store_reg_vector(dyn, ninst, x1, v0, gd, 16 << vex.l, VECTOR_SEW32);
+                simd_store_reg(dyn, ninst, x1, v0, gd, 16 << vex.l, VECTOR_SEW32);
                 break;
             }
             GETGX();
@@ -2266,21 +2310,21 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
         case 0xDD:
             INST_NAME("VAESENCLAST Gx, Vx, Ex");
             nextop = F8;
-            if (cpuext.zvkned && (!vex.l || cpuext.vlen >= 32)) {
+            if (cpuext.zvkned && cpuext.vlen >= 32) {
                 gd = ((nextop & 0x38) >> 3) + (rex.r << 3);
                 SET_AVX_VECTOR_WIDTH(x1, VECTOR_SEW32);
-                v0 = fpu_get_scratch(dyn);
-                avx_load_reg_vector(dyn, ninst, x1, v0, vex.v, 16 << vex.l, VECTOR_SEW32);
-                v1 = fpu_get_scratch(dyn);
+                v0 = vpu_get_scratch(dyn);
+                simd_load_reg(dyn, ninst, x1, v0, vex.v, 16 << vex.l, VECTOR_SEW32);
+                v1 = vpu_get_scratch(dyn);
                 if (MODREG) {
-                    avx_load_reg_vector(dyn, ninst, x1, v1, (nextop & 7) + (rex.b << 3), 16 << vex.l, VECTOR_SEW32);
+                    simd_load_reg(dyn, ninst, x1, v1, (nextop & 7) + (rex.b << 3), 16 << vex.l, VECTOR_SEW32);
                 } else {
                     SMREAD();
                     addr = geted(dyn, addr, ninst, nextop, &ed, x3, x2, &fixedaddress, rex, NULL, 0, 0);
                     VLE32_V(v1, ed, VECTOR_UNMASKED, VECTOR_NFIELD1);
                 }
                 VAESEF_VV(v0, v1);
-                avx_store_reg_vector(dyn, ninst, x1, v0, gd, 16 << vex.l, VECTOR_SEW32);
+                simd_store_reg(dyn, ninst, x1, v0, gd, 16 << vex.l, VECTOR_SEW32);
                 break;
             }
             GETGX();
@@ -2341,22 +2385,22 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
             if (vex.l) {
                 DEFAULT;
             }
-            if (cpuext.zvkned) {
+            if (cpuext.zvkned && cpuext.vlen >= 32 && !vex.l) {
                 gd = ((nextop & 0x38) >> 3) + (rex.r << 3);
                 SET_AVX_VECTOR_WIDTH(x1, VECTOR_SEW32);
-                v1 = fpu_get_scratch(dyn);
+                v1 = vpu_get_scratch(dyn);
                 if (MODREG) {
-                    avx_load_reg_vector(dyn, ninst, x1, v1, (nextop & 7) + (rex.b << 3), 16, VECTOR_SEW32);
+                    simd_load_reg(dyn, ninst, x1, v1, (nextop & 7) + (rex.b << 3), 16, VECTOR_SEW32);
                 } else {
                     SMREAD();
                     addr = geted(dyn, addr, ninst, nextop, &ed, x3, x2, &fixedaddress, rex, NULL, 0, 0);
                     VLE32_V(v1, ed, VECTOR_UNMASKED, VECTOR_NFIELD1);
                 }
-                v2 = fpu_get_scratch(dyn);
+                v2 = vpu_get_scratch(dyn);
                 MOV32w(x4, 0x63636363);
                 VMV_V_X(v2, x4);
                 VAESDM_VV(v2, v1);
-                avx_store_reg_vector(dyn, ninst, x1, v2, gd, 16, VECTOR_SEW32);
+                simd_store_reg(dyn, ninst, x1, v2, gd, 16, VECTOR_SEW32);
                 break;
             }
             GETGX();
@@ -2365,7 +2409,7 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
                 LD(x3, wback, fixedaddress + i * 8);
                 SD(x3, gback, gdoffset + i * 8);
             }
-            sse_forget_reg(dyn, ninst, x6, gd);
+            simd_forget_fp_reg(dyn, ninst, x6, gd);
             MOV32w(x1, gd);
             CALL(const_native_aesimc, -1, x1, 0);
             YMM0(gd);
@@ -2373,28 +2417,28 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
         case 0xDE:
             INST_NAME("VAESDEC Gx, Vx, Ex");
             nextop = F8;
-            if (cpuext.zvkned && (!vex.l || cpuext.vlen >= 32)) {
+            if (cpuext.zvkned && cpuext.vlen >= 32) {
                 gd = ((nextop & 0x38) >> 3) + (rex.r << 3);
                 SET_AVX_VECTOR_WIDTH(x1, VECTOR_SEW32);
-                v0 = fpu_get_scratch(dyn);
-                avx_load_reg_vector(dyn, ninst, x1, v0, vex.v, 16 << vex.l, VECTOR_SEW32);
-                v1 = fpu_get_scratch(dyn);
+                v0 = vpu_get_scratch(dyn);
+                simd_load_reg(dyn, ninst, x1, v0, vex.v, 16 << vex.l, VECTOR_SEW32);
+                v1 = vpu_get_scratch(dyn);
                 if (MODREG) {
-                    avx_load_reg_vector(dyn, ninst, x1, v1, (nextop & 7) + (rex.b << 3), 16 << vex.l, VECTOR_SEW32);
+                    simd_load_reg(dyn, ninst, x1, v1, (nextop & 7) + (rex.b << 3), 16 << vex.l, VECTOR_SEW32);
                 } else {
                     SMREAD();
                     addr = geted(dyn, addr, ninst, nextop, &ed, x3, x2, &fixedaddress, rex, NULL, 0, 0);
                     VLE32_V(v1, ed, VECTOR_UNMASKED, VECTOR_NFIELD1);
                 }
-                v2 = fpu_get_scratch(dyn);
+                v2 = vpu_get_scratch(dyn);
                 VXOR_VV(v2, v2, v2, 1);
                 VAESDF_VV(v0, v2);
-                v2 = fpu_get_scratch(dyn);
+                v2 = vpu_get_scratch(dyn);
                 MOV32w(x4, 0x63636363);
                 VMV_V_X(v2, x4);
                 VAESDM_VV(v2, v0);
                 VXOR_VV(v0, v2, v1, 1);
-                avx_store_reg_vector(dyn, ninst, x1, v0, gd, 16 << vex.l, VECTOR_SEW32);
+                simd_store_reg(dyn, ninst, x1, v0, gd, 16 << vex.l, VECTOR_SEW32);
                 break;
             }
             GETGX();
@@ -2452,21 +2496,21 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
         case 0xDF:
             INST_NAME("VAESDECLAST Gx, Vx, Ex");
             nextop = F8;
-            if (cpuext.zvkned && (!vex.l || cpuext.vlen >= 32)) {
+            if (cpuext.zvkned && cpuext.vlen >= 32) {
                 gd = ((nextop & 0x38) >> 3) + (rex.r << 3);
                 SET_AVX_VECTOR_WIDTH(x1, VECTOR_SEW32);
-                v0 = fpu_get_scratch(dyn);
-                avx_load_reg_vector(dyn, ninst, x1, v0, vex.v, 16 << vex.l, VECTOR_SEW32);
-                v1 = fpu_get_scratch(dyn);
+                v0 = vpu_get_scratch(dyn);
+                simd_load_reg(dyn, ninst, x1, v0, vex.v, 16 << vex.l, VECTOR_SEW32);
+                v1 = vpu_get_scratch(dyn);
                 if (MODREG) {
-                    avx_load_reg_vector(dyn, ninst, x1, v1, (nextop & 7) + (rex.b << 3), 16 << vex.l, VECTOR_SEW32);
+                    simd_load_reg(dyn, ninst, x1, v1, (nextop & 7) + (rex.b << 3), 16 << vex.l, VECTOR_SEW32);
                 } else {
                     SMREAD();
                     addr = geted(dyn, addr, ninst, nextop, &ed, x3, x2, &fixedaddress, rex, NULL, 0, 0);
                     VLE32_V(v1, ed, VECTOR_UNMASKED, VECTOR_NFIELD1);
                 }
                 VAESDF_VV(v0, v1);
-                avx_store_reg_vector(dyn, ninst, x1, v0, gd, 16 << vex.l, VECTOR_SEW32);
+                simd_store_reg(dyn, ninst, x1, v0, gd, 16 << vex.l, VECTOR_SEW32);
                 break;
             }
             GETGX();
@@ -2524,7 +2568,7 @@ uintptr_t dynarec64_AVX_66_0F38(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t i
         case 0xF7:
             INST_NAME("SHLX Gd, Ed, Vd");
             nextop = F8;
-            GETGD;
+            GETGDd;
             GETED(0);
             GETVD;
             ANDI(x5, vd, rex.w ? 0x3f : 0x1f);

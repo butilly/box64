@@ -66,6 +66,9 @@ uintptr_t box64_pagesize;
 path_collection_t box64_addlibs = {0};
 int box64_is32bits = 0;
 int box64_isAddressSpace32 = 0;
+#ifndef ARM64
+int box64_ymm_split = 0;
+#endif
 int box64_rdtsc = 0;
 uint8_t box64_rdtsc_shift = 0;
 int box64_mapclean = 0;
@@ -141,8 +144,8 @@ static void openFTrace(void)
             else
                 sprintf(pid, "%d", GetTID());
             strcat(tmp, pid);
-            c = strstr(p, "\%pid") + strlen("\%pid");
-            strcat(tmp, c);
+            const char* rest = strstr(p, "\%pid") + strlen("\%pid");
+            strcat(tmp, rest);
             ++next;
         } while (FileExist(tmp, IS_FILE) && !append);
         p = tmp;
@@ -210,6 +213,19 @@ void computeRDTSC()
     printf_log_prefix(0, LOG_INFO, "\n");
 }
 
+static void SetYmmMode(void)
+{
+    #ifdef ARM64
+    printf_log(LOG_DEBUG, "Using separate xmm/ymm registers\n");
+    #elif defined(RV64)
+    box64_ymm_split = 0;
+    printf_log(LOG_DEBUG, "Using unified xmm/ymm registers\n");
+    #else
+    box64_ymm_split = BOX64ENV(dynarec) ? 1 : 0;
+    printf_log(LOG_DEBUG, "Using %s xmm/ymm registers\n", box64_ymm_split?"separate":"unified");
+    #endif
+}
+
 static void displayMiscInfo(void)
 {
     openFTrace();
@@ -237,6 +253,7 @@ static void displayMiscInfo(void)
     }
 #endif
 #endif
+    SetYmmMode();
 
     printf_log(LOG_INFO, "Running on %s with %d core%s, pagesize: %zd", box64_sysinfo.cpuname, box64_sysinfo.ncpu, box64_sysinfo.ncpu > 1 ? "s" : "", box64_pagesize);
     if (BOX64ENV(maxcpu))
@@ -714,7 +731,7 @@ void setupTrace()
 #endif
 }
 #ifndef STATICBUILD
-void endMallocHook();
+void guest_alloc_fini(void);
 #endif
 
 void finiPendingDLOpenedNoUnload(x64emu_t* emu);
@@ -767,7 +784,7 @@ void endBox64()
             DecRefCount(&needed->libs[i], emu);
     // all done, free context
     #ifndef STATICBUILD
-    endMallocHook();
+    guest_alloc_fini();
     #endif
     SerializeAllMapping();   // to be safe
     FreeBox64Context(&my_context);
@@ -819,10 +836,9 @@ extern char** environ;
 int initialize(int argc, const char **argv, char** env, x64emu_t** emulator, elfheader_t** elfheader, int exec)
 {
 #ifndef STATICBUILD
-    init_malloc_hook();
+    init_guestalloc();
 #endif
     init_auxval(argc, argv, environ?environ:env);
-    ftrace = stderr;    // init early: BOX64_VERSION path below uses PrintfFtrace
     // analogue to QEMU_VERSION in qemu-user-mode emulation
     if(getenv("BOX64_VERSION")) {
         PrintBox64Version(0);
@@ -1023,6 +1039,7 @@ int initialize(int argc, const char **argv, char** env, x64emu_t** emulator, elf
     }
     // Create a new context
     #ifdef BOX32
+    init_custommem_helper(NULL);    //might be needed
     box64_is32bits = FileIsX86ELF(prog);
     #endif
     my_context = NewBox64Context(argc - nextarg);
@@ -1079,35 +1096,6 @@ int initialize(int argc, const char **argv, char** env, x64emu_t** emulator, elf
     }
     #endif
 
-    path_collection_t ld_preload = {0};
-    if(getenv("BOX64_LD_PRELOAD")) {
-        char* p = getenv("BOX64_LD_PRELOAD");
-        ParseList(p, &ld_preload, 0);
-        if (ld_preload.size && BOX64ENV(log)) {
-            printf_log(LOG_INFO, "BOX64 trying to Preload ");
-            for (int i=0; i<ld_preload.size; ++i)
-                printf_log_prefix(0, LOG_INFO, "%s ", ld_preload.paths[i]);
-            printf_log_prefix(0, LOG_INFO, "\n");
-        }
-    }
-    if(getenv("LD_PRELOAD")) {
-        char* p = getenv("LD_PRELOAD");
-        if(strstr(p, "libtcmalloc_minimal.so.0"))
-            box64_tcmalloc_minimal = 1;
-        if(strstr(p, "libtcmalloc_minimal.so.4"))
-            box64_tcmalloc_minimal = 1;
-        if(strstr(p, "libtcmalloc_minimal_debug.so.4"))
-            box64_tcmalloc_minimal = 1;
-        if(strstr(p, "libasan.so"))
-            box64_tcmalloc_minimal = 1; // it seems Address Sanitizer doesn't handle dlsym'd malloc very well
-        AppendList(&ld_preload, p, 0);
-        if (ld_preload.size && BOX64ENV(log)) {
-            printf_log(LOG_INFO, "BOX64 trying to Preload ");
-            for (int i=0; i<ld_preload.size; ++i)
-                printf_log_prefix(0, LOG_INFO, "%s ", ld_preload.paths[i]);
-            printf_log_prefix(0, LOG_INFO, "\n");
-        }
-    }
     // print PATH and LD_LIB used
     PrintCollection(&my_context->box64_ld_lib, "Library search path");
     PrintCollection(&my_context->box64_path, "Binary search path");
@@ -1145,13 +1133,6 @@ int initialize(int argc, const char **argv, char** env, x64emu_t** emulator, elf
         box64_guest_name = prog;
     else
         ++box64_guest_name;
-    if(box64_wine) {
-        #ifdef ANDROID
-            AddPath("libdl.so", &ld_preload, 0);
-        #else
-            AddPath("libdl.so.2", &ld_preload, 0);
-        #endif
-    }
     // special case for zoom
     if (strstr(box64_guest_name, "zoom") == box64_guest_name) {
         printf_log(LOG_INFO, "Zoom detected, Trying to use system libturbojpeg if possible\n");
@@ -1189,6 +1170,42 @@ int initialize(int argc, const char **argv, char** env, x64emu_t** emulator, elf
     if (applied) {
         printf_log(LOG_INFO, "Applied settings from rcfile\n");
         displayMiscInfo();
+    }
+    path_collection_t ld_preload = {0};
+    if(BOX64ENV(ld_preload)) {
+        char* p = BOX64ENV(ld_preload);
+        ParseList(p, &ld_preload, 0);
+        if (ld_preload.size && BOX64ENV(log)) {
+            printf_log(LOG_INFO, "BOX64 trying to Preload ");
+            for (int i=0; i<ld_preload.size; ++i)
+                printf_log_prefix(0, LOG_INFO, "%s ", ld_preload.paths[i]);
+            printf_log_prefix(0, LOG_INFO, "\n");
+        }
+    }
+    if(getenv("LD_PRELOAD")) {
+        char* p = getenv("LD_PRELOAD");
+        if(strstr(p, "libtcmalloc_minimal.so.0"))
+            box64_tcmalloc_minimal = 1;
+        if(strstr(p, "libtcmalloc_minimal.so.4"))
+            box64_tcmalloc_minimal = 1;
+        if(strstr(p, "libtcmalloc_minimal_debug.so.4"))
+            box64_tcmalloc_minimal = 1;
+        if(strstr(p, "libasan.so"))
+            box64_tcmalloc_minimal = 1; // it seems Address Sanitizer doesn't handle dlsym'd malloc very well
+        AppendList(&ld_preload, p, 0);
+        if (ld_preload.size && BOX64ENV(log)) {
+            printf_log(LOG_INFO, "BOX64 trying to Preload ");
+            for (int i=0; i<ld_preload.size; ++i)
+                printf_log_prefix(0, LOG_INFO, "%s ", ld_preload.paths[i]);
+            printf_log_prefix(0, LOG_INFO, "\n");
+        }
+    }
+    if(box64_wine) {
+        #ifdef ANDROID
+            AddPath("libdl.so", &ld_preload, 0);
+        #else
+            AddPath("libdl.so.2", &ld_preload, 0);
+        #endif
     }
     if (BOX64ENV(ondemand_steamui) && (!strcmp(box64_guest_name, "steam") || !strcmp(box64_guest_name, "steamwebhelper")))
         StartOnDemandSteamUI();
@@ -1541,6 +1558,7 @@ int initialize(int argc, const char **argv, char** env, x64emu_t** emulator, elf
         dynarec_wine_prereserve();
         #endif
     }
+    if(!box64_nolibs) PatchLoadedDynamicSection(elf_header);
     AddMainElfToLinkmap(elf_header);    //TODO: LinkMap seems incorect
     // pre-load lib if needed
     if(ld_preload.size) {

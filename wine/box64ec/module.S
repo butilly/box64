@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+#include "box64ec_layout.h"
+
 /* ARM64EC dispatch bridges for box64ec.dll
  * Implements documented __os_arm64x_* helpers exported as ExitToX64 / DispatchJump /
  * RetToEntryThunk / BeginSimulation
@@ -162,9 +164,18 @@ enter_jit:
     ldr     x1,  [x17, #0x8]             /* EmulatorStackBase */
     cbz     x1,  .Lenter_jit_fail
     mov     x4,  x1                      /* keep stack base for range check */
-
-     /* Experimental: keep this activation below a live Wine callback frame. */
     ldr     x3,  [x17, #0x10]            /* EmulatorStackLimit */
+
+    /* a callback during a fast native call: start below the live JIT frame */
+    ldr     x2,  [x17, #0x30]            /* EmulatorData[EC_DATA_EMU] */
+    cbz     x2,  .Lenter_jit_physical_stack
+    ldr     x2,  [x2, #BOX64EC_EMU_JIT_FRAME_OFFSET]
+    cmp     x2,  x3
+    b.ls    .Lenter_jit_physical_stack   /* none, or not on the emulator stack */
+    cmp     x2,  x1
+    csel    x1,  x2, x1, lo
+.Lenter_jit_physical_stack:
+     /* Experimental: keep this activation below a live Wine callback frame. */
     cmp     x11, x3
     b.lo    .Lenter_jit_stack_base       /* physical SP is not EmulatorStack */
     cmp     x11, x4
@@ -208,6 +219,15 @@ enter_jit_frame:
     str     d13, [x16, #0x270]
     str     d14, [x16, #0x280]
     str     d15, [x16, #0x290]
+    /* native return: XMM6-15 are whole, a fast native call never exported them */
+    cmp     w6, #3
+    b.ne    7f
+    stp     q6,  q7,  [x16, #0x200]
+    stp     q8,  q9,  [x16, #0x220]
+    stp     q10, q11, [x16, #0x240]
+    stp     q12, q13, [x16, #0x260]
+    stp     q14, q15, [x16, #0x280]
+7:
 
     /* Save entry-only values after the guest nonvolatiles are protected. */
     stp     x10, x11, [sp, #0x30]        /* pushed slot, physical entry SP */
@@ -352,7 +372,7 @@ DispatchJump:
     mov     w17, #0x200
     movk    w17, #0xd63f, lsl #16        /* encoding of blr x16 */
     cmp     w16, w17
-    b.ne    1f
+    b.ne    2f
     mov     x16, sp
     tbz     x16, #3, 1f
     mov     x0, x9                       /* bad native continuation */
@@ -361,6 +381,11 @@ DispatchJump:
     brk     #0xec06
 1:
     br      x9
+2:
+    /* Adjustor entry thunks still carry x64 arguments and the original SP in x4. */
+    and     x16, x16, #~3
+    add     x16, x9, x16
+    br      x16
 
     /* __os_arm64x_dispatch_ret - return to x64 (addr in LR).
      * SP is already correct for post-CALL x64 (ExitFunctionEC popped the
@@ -374,6 +399,26 @@ RetToEntryThunk:
     mov     x11, sp                      /* physical SP, no push on this route */
     mov     x10, sp
     ldr     x10, [x10]
+
+#ifdef DYNAREC
+    /* return of a fast native call: resume the live activation (x12, x15-x17 free) */
+    ldr     x17, [x18, #0x1788]
+    ldr     x17, [x17, #0x30]            /* EmulatorData[EC_DATA_EMU] */
+    cbz     x17, .Lret_normal
+    ldr     x12, [x17, #BOX64EC_EMU_CALLRET_SP_OFFSET]
+    ldp     x15, x16, [x12]              /* tag and flags, pre-call RSP */
+    lsr     x15, x15, #32
+    and     w15, w15, #~BOX64EC_FAST_RECORD_CALLRET
+    mov     w17, #BOX64EC_FAST_RECORD_TAG_LOW
+    movk    w17, #BOX64EC_FAST_RECORD_TAG_HIGH, lsl #16
+    cmp     w15, w17
+    b.ne    .Lret_normal
+    add     x16, x16, #8                 /* the return popped the guest return address */
+    cmp     x11, x16
+    b.ne    .Lret_normal
+    b       arm64_ec_fast_resume
+.Lret_normal:
+#endif
 
      /* Shared: x9 = target; SP unchanged. */
 .Lcheck_target_ec:
@@ -493,8 +538,11 @@ BeginSimulation:
 ExitFunctionEC:
     /* Clear AFP NEP+AH - native EC code will not expect them */
     mrs     x17, fpcr
+    tst     x17, #6
+    b.eq    .Lexit_fpcr_clear            /* an FPCR write is slow, usually they are clear */
     and     x17, x17, #~6
     msr     fpcr, x17
+.Lexit_fpcr_clear:
 
     ldr     x17, [x18, #0x1788]
     strb    wzr, [x17]                   /* InSimulation = 0 */
@@ -540,6 +588,7 @@ ExitFunctionSuspendResumePoint:
     /* Leave retaddr on stack; EC returns to a single x64 `ret` (0xC3). */
     adrp    x16, Box64EC_X64ReturnInstr
     ldr     x30, [x16, :lo12:Box64EC_X64ReturnInstr]
+    add     x4, x4, #8                   /* entry thunks read stack args via x4: point past the retaddr */
 
 .Lexit_ec_br:
     br      x17
@@ -572,4 +621,39 @@ Box64EC_NtContinueNative:
 1:
     mov     x8, #0x43                    /* Windows NtContinue */
     svc     #0
+    ret
+
+    /* ------------------------------------------------------------------ */
+    /* setjmp/longjmp for FillBlock64 (os.h). x0 = buffer of 18 slots.     */
+    /* Only the callee-saved registers ARM64EC code can use: x23, x24 and  */
+    /* x28 are never live in C here.                                       */
+    /* ------------------------------------------------------------------ */
+    .globl Box64EC_SetJmp
+Box64EC_SetJmp:
+    stp     x19, x20, [x0, #0x00]
+    stp     x21, x22, [x0, #0x10]
+    stp     x25, x26, [x0, #0x20]
+    stp     x27, x29, [x0, #0x30]
+    mov     x16, sp
+    stp     x30, x16, [x0, #0x40]
+    stp     d8,  d9,  [x0, #0x50]
+    stp     d10, d11, [x0, #0x60]
+    stp     d12, d13, [x0, #0x70]
+    stp     d14, d15, [x0, #0x80]
+    mov     w0, #0
+    ret
+
+    .globl Box64EC_LongJmp
+Box64EC_LongJmp:
+    ldp     x19, x20, [x0, #0x00]
+    ldp     x21, x22, [x0, #0x10]
+    ldp     x25, x26, [x0, #0x20]
+    ldp     x27, x29, [x0, #0x30]
+    ldp     x30, x16, [x0, #0x40]
+    ldp     d8,  d9,  [x0, #0x50]
+    ldp     d10, d11, [x0, #0x60]
+    ldp     d12, d13, [x0, #0x70]
+    ldp     d14, d15, [x0, #0x80]
+    mov     sp, x16
+    mov     w0, #1
     ret

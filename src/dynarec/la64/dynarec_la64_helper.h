@@ -76,6 +76,7 @@ typedef struct xmm_scalar_s {
     xmm_scalar_kind_t kind;
     xmm_upper_policy_t upper_policy;
     int renamed;
+    int preserved_dead;
 } xmm_scalar_t;
 
 static inline void xmm_live_track(dynarec_la64_t* dyn, int ninst, int reg)
@@ -214,6 +215,10 @@ static inline void xmm_scalar_merge(dynarec_la64_t* dyn, int ninst, int reg)
     int renamed = dyn->lsx.scalarcache[reg];
     if (renamed < 0) return;
     int full = dyn->lsx.ssecache[reg].reg;
+    if (dyn->lsx.upper_clear_pending & (1u << reg)) {
+        VXOR_V(full, full, full);
+        dyn->lsx.upper_clear_pending &= (uint16_t)~(1u << reg);
+    }
     if (dyn->lsx.lsxcache[renamed].t == LSX_CACHE_XMM_S)
         VEXTRINS_W(full, renamed, 0);
     else
@@ -230,10 +235,12 @@ static inline void xmm_scalar_discard(dynarec_la64_t* dyn, int reg)
     if (renamed < 0) return;
     fpu_free_reg(dyn, renamed);
     dyn->lsx.scalarcache[reg] = -1;
+    dyn->lsx.upper_clear_pending &= (uint16_t)~(1u << reg);
 }
 
 static inline int xmm_scalar_begin(dynarec_la64_t* dyn, int ninst, xmm_scalar_t* scalar, int host_dst, int guest_dst, int allow_direct, xmm_scalar_kind_t kind, xmm_upper_policy_t upper_policy)
 {
+    int preserved_dead = xmm_preserved_lanes_dead(dyn, ninst, guest_dst, kind);
     xmm_scalar_track_write(dyn, ninst, guest_dst, upper_policy);
     int full_dst = dyn->lsx.ssecache[guest_dst].reg;
     int renamed = dyn->lsx.scalarcache[guest_dst];
@@ -252,9 +259,10 @@ static inline int xmm_scalar_begin(dynarec_la64_t* dyn, int ninst, xmm_scalar_t*
     scalar->kind = kind;
     scalar->upper_policy = upper_policy;
     scalar->renamed = 0;
+    scalar->preserved_dead = preserved_dead;
     if (allow_direct && renamed >= 0) {
         if (upper_policy == XMM_UPPER_CLEAR)
-            VXOR_V(full_dst, full_dst, full_dst);
+            dyn->lsx.upper_clear_pending |= (uint16_t)(1u << guest_dst);
         scalar->result = renamed;
         scalar->renamed = 1;
         return scalar->result;
@@ -264,7 +272,7 @@ static inline int xmm_scalar_begin(dynarec_la64_t* dyn, int ninst, xmm_scalar_t*
         int result = fpu_get_reg_xmm_scalar(dyn, kind == XMM_SCALAR_SS ? LSX_CACHE_XMM_S : LSX_CACHE_XMM_D, guest_dst);
         if (result >= 0) {
             if (upper_policy == XMM_UPPER_CLEAR)
-                VXOR_V(full_dst, full_dst, full_dst);
+                dyn->lsx.upper_clear_pending |= (uint16_t)(1u << guest_dst);
             scalar->result = result;
             scalar->renamed = 1;
             return scalar->result;
@@ -277,13 +285,15 @@ static inline int xmm_scalar_begin(dynarec_la64_t* dyn, int ninst, xmm_scalar_t*
 
 static inline void xmm_scalar_end(dynarec_la64_t* dyn, int ninst, const xmm_scalar_t* scalar)
 {
+    if (scalar->renamed) {
+        xmm_scalar_merge(dyn, ninst, scalar->guest_dst);
+        return;
+    }
     dyn->lsx.ssecache[scalar->guest_dst].write = 1;
     dyn->lsx.lsxcache[scalar->host_dst].t = LSX_CACHE_XMMW;
-    if (scalar->renamed)
-        return;
     if (scalar->host_dst == scalar->result)
         return;
-    if (scalar->upper_policy == XMM_UPPER_CLEAR)
+    if (scalar->upper_policy == XMM_UPPER_CLEAR && !scalar->preserved_dead)
         VXOR_V(scalar->host_dst, scalar->host_dst, scalar->host_dst);
     if (scalar->kind == XMM_SCALAR_SS)
         VEXTRINS_W(scalar->host_dst, scalar->result, 0);
@@ -435,8 +445,6 @@ static inline int comis_fuse_inverted(int condition)
 
 #define MARKREGd(r)                      \
     do {                                 \
-        if ((r) == xRSP)                 \
-            MARK_LEAF_RSP(LEAF_RSP_REF); \
         if (rex.w)                       \
             UP32_WRITE64(r);             \
         else                             \
@@ -445,8 +453,6 @@ static inline int comis_fuse_inverted(int condition)
 
 #define MARKREGdz(r)                     \
     do {                                 \
-        if ((r) == xRSP)                 \
-            MARK_LEAF_RSP(LEAF_RSP_REF); \
         if (!rex.is32bits)               \
             UP32_WRITE64(r);             \
         else                             \
@@ -455,15 +461,11 @@ static inline int comis_fuse_inverted(int condition)
 
 #define MARKREGs(r)                      \
     do {                                 \
-        if ((r) == xRSP)                 \
-            MARK_LEAF_RSP(LEAF_RSP_REF); \
         if (rex.w) UP32_READ(r);         \
     } while (0)
 
 #define MARKREGsz(r)                     \
     do {                                 \
-        if ((r) == xRSP)                 \
-            MARK_LEAF_RSP(LEAF_RSP_REF); \
         if (!rex.is32bits) UP32_READ(r); \
     } while (0)
 
@@ -1644,7 +1646,7 @@ static inline int comis_fuse_inverted(int condition)
             GRABFLAGS(((dyn->insts[ninst].x64.gen_flags & X_PEND) ? X_ALL : dyn->insts[ninst].x64.gen_flags) & (~(A))); \
         if (dyn->insts[ninst].x64.gen_flags) switch (B) {                                                               \
                 case SF_SET_DF: dyn->f = status_set; break;                                                             \
-                case SF_SET_NODF: SET_DFNONE(); break;                                                                  \
+                case SF_SET_NODF: break;                                                                                \
                 case SF_SUBSET:                                                                                         \
                 case SF_SUBSET_PENDING:                                                                                 \
                 case SF_SET:                                                                                            \
@@ -1653,7 +1655,7 @@ static inline int comis_fuse_inverted(int condition)
                     SET_DFNONE();                                                                                       \
                     break;                                                                                              \
             }                                                                                                           \
-        else                                                                                                            \
+        else if ((B) != SF_SET_NODF)                                                                                    \
             SET_DFNONE();                                                                                               \
         dyn->insts[ninst].nat_flags_nofusion = (FUSION);                                                                \
     } while (0)
@@ -1666,26 +1668,6 @@ static inline int comis_fuse_inverted(int condition)
 #endif
 #ifndef SET_HASCALLRET
 #define SET_HASCALLRET()
-#endif
-#ifndef MARK_LEAF_CALL
-#define MARK_LEAF_CALL() \
-    do {                 \
-    } while (0)
-#endif
-#ifndef MARK_LEAF_CALL_TARGET
-#define MARK_LEAF_CALL_TARGET(T) \
-    do {                         \
-    } while (0)
-#endif
-#ifndef MARK_LEAF_RET
-#define MARK_LEAF_RET() \
-    do {                \
-    } while (0)
-#endif
-#ifndef MARK_LEAF_RSP
-#define MARK_LEAF_RSP(F) \
-    do {                 \
-    } while (0)
 #endif
 #ifndef CALLRET_RET
 #define CALLRET_RET(A)   do {if(BOX64DRENV(dynarec_callret)>1) {NOP();}} while(0)
@@ -1797,9 +1779,6 @@ static inline int comis_fuse_inverted(int condition)
 
 #define native_pass STEPNAME(native_pass)
 #define updateflags_pass STEPNAME(updateflags_pass)
-
-#define emit_inline_leaf STEPNAME(emit_inline_leaf)
-void emit_inline_leaf(dynarec_la64_t* dyn, int ninst);
 
 #define dynarec64_00          STEPNAME(dynarec64_00)
 #define dynarec64_00_0        STEPNAME(dynarec64_00_0)

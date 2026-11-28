@@ -60,6 +60,11 @@ static inline void mxcsr_raise_invalid(x64emu_t* emu)
     box64_feraise_invalid();
 }
 
+static inline void mxcsr_raise_precision(x64emu_t* emu)
+{
+    emu->mxcsr.f.MXCSR_PE = 1;
+}
+
 /* Apply guest MXCSR rounding mode and return the previous host mode. */
 static inline int mxcsr_setround(x64emu_t* emu)
 {
@@ -131,6 +136,8 @@ reg64_t* GetEbO(x64emu_t *emu, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t de
 reg64_t* TestEbO(x64test_t *test, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t delta, uintptr_t offset);
 reg64_t* GetEd(x64emu_t *emu, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t delta);
 reg64_t* TestEd(x64test_t *test, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t delta);
+reg64_t* TestEd1(x64test_t *test, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t delta);
+reg64_t* TestEd2(x64test_t *test, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t delta);
 reg64_t* TestEd4(x64test_t *test, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t delta);
 reg64_t* TestEd4O(x64test_t *test, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t delta, uintptr_t offset);
 reg64_t* TestEd8(x64test_t *test, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t delta);

@@ -12,7 +12,7 @@ typedef struct box64context_s box64context_t;
 extern box64env_t box64env;
 extern box64env_t* cur_box64env;
 
-#define X86_PAGE_SIZE 4096UL
+#define X86_PAGE_SIZE 4096ULL
 
 #define ALIGN(p) (((p)+box64_pagesize-1)&~(box64_pagesize-1))
 #define ALIGN_DOWN(p) ((p)&~(box64_pagesize-1))
@@ -22,6 +22,9 @@ extern int box64_rdtsc;
 extern uint8_t box64_rdtsc_shift;
 extern int box64_is32bits;
 extern int box64_isAddressSpace32;
+#ifndef ARM64
+extern int box64_ymm_split;
+#endif
 extern int box64_nolibs;
 extern int box64_hasinterp;
 #if defined(DYNAREC) || defined(BOX64EC)
@@ -109,7 +112,7 @@ extern sysinfo_t box64_sysinfo;
 
 #ifndef _WIN32 // TODO: better wow64 support?
 #ifndef STATICBUILD
-void init_malloc_hook(void);
+void init_guestalloc(void);
 #endif
 #if defined(ANDROID) || defined(STATICBUILD)
 #define box_malloc      malloc

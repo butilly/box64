@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-#define _GNU_SOURCE /* See feature_test_macros(7) */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -403,13 +402,34 @@ reg64_t* TestEd(x64test_t *test, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t 
         return (reg64_t*)test->mem;
     }
 }
+reg64_t* TestEd1(x64test_t *test, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t delta)
+{
+    uint8_t m = v&0xC7;    // filter Ed
+    if(m>=0xC0) {
+        return &test->emu->regs[(m&0x07)+(rex.b<<3)];
+    } else {
+        reg64_t* ret =  GetECommon(test->emu, addr, rex, m, delta);
+        test->memsize = 1;
+        test->memaddr = (uintptr_t)ret;
+        *(uint8_t*)test->mem = ret->byte[0];
+        return (reg64_t*)test->mem;
+    }
+}
+reg64_t* TestEd2(x64test_t *test, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t delta)
+{
+    uint8_t m = v&0xC7;    // filter Ed
+    if(m>=0xC0) {
+        return &test->emu->regs[(m&0x07)+(rex.b<<3)];
+    } else {
+        reg64_t* ret =  GetECommon(test->emu, addr, rex, m, delta);
+        test->memsize = 2;
+        test->memaddr = (uintptr_t)ret;
+        *(uint16_t*)test->mem = ret->word[0];
+        return (reg64_t*)test->mem;
+    }
+}
 reg64_t* TestEd4(x64test_t *test, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t delta)
 {
-    if(rex.is67 && rex.is32bits) {
-        printf_log(LOG_NONE, "Need 32bits 67 prefix TestEd4x\n");
-        test->emu->quit = 1;
-        return NULL;
-    }
     uint8_t m = v&0xC7;    // filter Ed
     if(m>=0xC0) {
         return &test->emu->regs[(m&0x07)+(rex.b<<3)];
@@ -423,11 +443,6 @@ reg64_t* TestEd4(x64test_t *test, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t
 }
 reg64_t* TestEd8(x64test_t *test, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t delta)
 {
-    if(rex.is67 && rex.is32bits) {
-        printf_log(LOG_NONE, "Need 32bits 67 prefix TestEd8\n");
-        test->emu->quit = 1;
-        return NULL;
-    }
     uint8_t m = v&0xC7;    // filter Ed
     if(m>=0xC0) {
         return &test->emu->regs[(m&0x07)+(rex.b<<3)];
@@ -441,11 +456,6 @@ reg64_t* TestEd8(x64test_t *test, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t
 }
 reg64_t* TestEdt(x64test_t *test, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t delta)
 {
-    if(rex.is67 && rex.is32bits) {
-        printf_log(LOG_NONE, "Need 32bits 67 prefix TestEdt\n");
-        test->emu->quit = 1;
-        return NULL;
-    }
     uint8_t m = v&0xC7;    // filter Ed
     if(m>=0xC0) {
         return &test->emu->regs[(m&0x07)+(rex.b<<3)];
@@ -459,11 +469,6 @@ reg64_t* TestEdt(x64test_t *test, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t
 }
 reg64_t* TestEd8xw(x64test_t *test, int w, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t delta)
 {
-    if(rex.is67 && rex.is32bits) {
-        printf_log(LOG_NONE, "Need 32bits 67 prefix TestEd4xw\n");
-        test->emu->quit = 1;
-        return NULL;
-    }
     uint8_t m = v&0xC7;    // filter Ed
     if(m>=0xC0) {
         return &test->emu->regs[(m&0x07)+(rex.b<<3)];
@@ -479,11 +484,6 @@ reg64_t* TestEd8xw(x64test_t *test, int w, uintptr_t* addr, rex_t rex, uint8_t v
 }
 reg64_t* TestEw(x64test_t *test, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t delta)
 {
-    if(rex.is67 && rex.is32bits) {
-        printf_log(LOG_NONE, "Need 32bits 67 prefix TestEw\n");
-        test->emu->quit = 1;
-        return NULL;
-    }
     uint8_t m = v&0xC7;    // filter Ed
     if(m>=0xC0) {
         return &test->emu->regs[(m&0x07)+(rex.b<<3)];
@@ -592,11 +592,6 @@ reg64_t* TestEw16(x64test_t *test, uintptr_t* addr, rex_t rex, uint8_t v)
 
 mmx87_regs_t* GetEm(x64emu_t *emu, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t delta)
 {
-    if(rex.is67 && rex.is32bits) {
-        printf_log(LOG_INFO, "Needed is67 32bits GetEm\n");
-        emu->quit = 1;
-        return NULL;
-    }
     uint8_t m = v&0xC7;    // filter Ed
     if(m>=0xC0) {
          return &emu->mmx[m&0x07];
@@ -619,14 +614,9 @@ mmx87_regs_t* TestEm(x64test_t *test, uintptr_t* addr, rex_t rex, uint8_t v, uin
 
 sse_regs_t* GetEx(x64emu_t *emu, uintptr_t* addr, rex_t rex, uint8_t v, uint8_t delta)
 {
-    if(rex.is67 && rex.is32bits) {
-        printf_log(LOG_INFO, "Needed is67 32bits GetEx\n");
-        emu->quit = 1;
-        return NULL;
-    }
     uint8_t m = v&0xC7;    // filter Ed
     if(m>=0xC0) {
-         return &emu->xmm[(m&0x07)+(rex.b<<3)];
+         return getXMM(emu, (m&0x07)+(rex.b<<3));
     } else return (sse_regs_t*)GetECommon(emu, addr, rex, m, delta);
 }
 
@@ -635,7 +625,7 @@ sse_regs_t* TestEx(x64test_t *test, uintptr_t* addr, rex_t rex, uint8_t v, uint8
     uint8_t m = v&0xC7;    // filter Ed
     if(m>=0xC0) {
         test->memsize=0;
-        return &test->emu->xmm[(m&0x07)+(rex.b<<3)];
+        return getXMM(test->emu, (m&0x07)+(rex.b<<3));
     } else {
         sse_regs_t* ret = (sse_regs_t*)GetECommon(test->emu, addr, rex, m, delta);
         test->memsize = sz;
@@ -649,7 +639,7 @@ sse_regs_t* TestEy(x64test_t *test, uintptr_t* addr, rex_t rex, uint8_t v)
     uint8_t m = v&0xC7;    // filter Ed
     if(m>=0xC0) {
         test->memsize=0;
-        return &test->emu->ymm[(m&0x07)+(rex.b<<3)];
+        return getYMM(test->emu, (m&0x07)+(rex.b<<3));
     } else {
         sse_regs_t* ret = (sse_regs_t*)(test->memaddr+16);
         test->memsize += 16;
@@ -684,11 +674,11 @@ mmx87_regs_t* GetGm(x64emu_t *emu, uintptr_t* addr, rex_t rex, uint8_t v)
 sse_regs_t* GetGx(x64emu_t *emu, uintptr_t* addr, rex_t rex, uint8_t v)
 {
     uint8_t m = (v&0x38)>>3;
-    return &emu->xmm[(m&7)+(rex.r<<3)];
+    return getXMM(emu, (m&7)+(rex.r<<3));
 }
 
 sse_regs_t* GetGy(x64emu_t *emu, uintptr_t* addr, rex_t rex, uint8_t v)
 {
     uint8_t m = (v&0x38)>>3;
-    return &emu->ymm[(m&7)+(rex.r<<3)];
+    return getYMM(emu, (m&7)+(rex.r<<3));
 }

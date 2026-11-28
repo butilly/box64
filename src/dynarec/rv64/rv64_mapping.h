@@ -69,6 +69,8 @@ x31     t6     x6           Temporary                       Scratch             
 
 // convert a x86 register to native according to the register mapping
 #define TO_NAT(A) (((uint8_t[]) { 16, 13, 12, 24, 9, 8, 11, 10, 14, 15, 26, 27, 18, 19, 20, 21 })[(A)])
+// convert a native register to x86 GPR (or -1 if not a GPR), reverse of TO_NAT
+#define TO_X64(A) (((int8_t[]) { -1, -1, -1, -1, -1, -1, -1, -1, 5, 4, 7, 6, 2, 1, 8, 9, 0, -1, 12, 13, 14, 15, -1, -1, 3, -1, 10, 11, -1, -1, -1, -1 })[(A)])
 #define IS_GPR(A) (((uint8_t[]) { 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0 })[(A)])
 #define IS_SCRATCH(A) (((uint8_t[]) { 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1 })[(A)])
 
@@ -118,6 +120,16 @@ x31     t6     x6           Temporary                       Scratch             
 #define RIP   x22
 #define Flags x23
 #define Emu   x25
+
+.macro rv64_sync_rounding scratch1, scratch2
+    lw      \scratch1, 800(Emu)
+    srli    \scratch1, \scratch1, 12
+    andi    \scratch1, \scratch1, 6
+    li      \scratch2, 0x78
+    srl     \scratch2, \scratch2, \scratch1
+    andi    \scratch2, \scratch2, 3
+    fsrm    \scratch2
+.endm
 
 #endif
 

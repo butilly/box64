@@ -13,7 +13,11 @@
 size_t get_size_arch(dynarec_arm_t* dyn);
 //populate the array
 void* populate_arch(dynarec_arm_t* dyn, void* p, size_t sz);
-#ifndef _WIN32
+#ifdef BOX64EC
+#include <winnt.h>
+//adjust flags and cached SIMD/x87 state after an ARM64EC JIT fault
+void adjust_arch(dynablock_t* db, x64emu_t* emu, ARM64_NT_CONTEXT* p, uintptr_t x64pc);
+#elif !defined(_WIN32)
 #include <ucontext.h>
 //adjust flags and more
 void adjust_arch(dynablock_t* db, x64emu_t* emu, ucontext_t* p, uintptr_t x64pc);
@@ -22,4 +26,9 @@ void adjust_arch(dynablock_t* db, x64emu_t* emu, ucontext_t* p, uintptr_t x64pc)
 #endif
 // get if instruction can be regenerated for unaligned access
 int arch_unaligned(dynablock_t* db, uintptr_t x64pc);
+// get if instruction has lrcpc so it can be regenerated without
+int arch_lrcpc(dynablock_t* db, uintptr_t x64pc);
+void add_lrcpc_address(uintptr_t addr);
+int is_addr_lrcpc(uintptr_t addr);
+int mark_db_lrcpc(dynablock_t* db, uintptr_t x64pc);
 #endif // __DYNAREC_ARM_ARCH_H__

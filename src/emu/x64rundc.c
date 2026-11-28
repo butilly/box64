@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-#define _GNU_SOURCE
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,7 +47,7 @@ uintptr_t RunDC(x64emu_t *emu, rex_t rex, uintptr_t addr)
         case 0xC6:
         case 0xC7:  /* FADD */
             ST(nextop&7).d = fpu_check_invalid(ST(nextop&7).d + ST0.d, ST(nextop&7).d, ST0.d);
-            if(!emu->cw.f.C87_PC) ST(nextop&7).d = (float)ST(nextop&7).d;
+            if(!emu->cw.f.C87_PC) ST(nextop&7).d = fpu_narrow(ST(nextop&7).d);
             break;
         case 0xC8:
         case 0xC9:
@@ -59,7 +58,7 @@ uintptr_t RunDC(x64emu_t *emu, rex_t rex, uintptr_t addr)
         case 0xCE:
         case 0xCF:  /* FMUL */
             ST(nextop&7).d = fpu_check_invalid(ST(nextop&7).d * ST0.d, ST(nextop&7).d, ST0.d);
-            if(!emu->cw.f.C87_PC) ST(nextop&7).d = (float)ST(nextop&7).d;
+            if(!emu->cw.f.C87_PC) ST(nextop&7).d = fpu_narrow(ST(nextop&7).d);
             break;
         case 0xD0:
         case 0xD1:
@@ -91,7 +90,7 @@ uintptr_t RunDC(x64emu_t *emu, rex_t rex, uintptr_t addr)
         case 0xE6:
         case 0xE7:  /* FSUBR */
             ST(nextop&7).d = fpu_check_invalid(ST0.d - ST(nextop&7).d, ST0.d, ST(nextop&7).d);
-            if(!emu->cw.f.C87_PC) ST(nextop&7).d = (float)ST(nextop&7).d;
+            if(!emu->cw.f.C87_PC) ST(nextop&7).d = fpu_narrow(ST(nextop&7).d);
             break;
         case 0xE8:
         case 0xE9:
@@ -102,7 +101,7 @@ uintptr_t RunDC(x64emu_t *emu, rex_t rex, uintptr_t addr)
         case 0xEE:
         case 0xEF:  /* FSUB */
             ST(nextop&7).d = fpu_check_invalid(ST(nextop&7).d - ST0.d, ST(nextop&7).d, ST0.d);
-            if(!emu->cw.f.C87_PC) ST(nextop&7).d = (float)ST(nextop&7).d;
+            if(!emu->cw.f.C87_PC) ST(nextop&7).d = fpu_narrow(ST(nextop&7).d);
             break;
         case 0xF0:
         case 0xF1:
@@ -113,7 +112,7 @@ uintptr_t RunDC(x64emu_t *emu, rex_t rex, uintptr_t addr)
         case 0xF6:
         case 0xF7:  /* FDIVR */
             ST(nextop&7).d = fpu_check_invalid(ST0.d / ST(nextop&7).d, ST0.d, ST(nextop&7).d);
-            if(!emu->cw.f.C87_PC) ST(nextop&7).d = (float)ST(nextop&7).d;
+            if(!emu->cw.f.C87_PC) ST(nextop&7).d = fpu_narrow(ST(nextop&7).d);
             break;
         case 0xF8:
         case 0xF9:
@@ -124,7 +123,7 @@ uintptr_t RunDC(x64emu_t *emu, rex_t rex, uintptr_t addr)
         case 0xFE:
         case 0xFF:  /* FDIV */
             ST(nextop&7).d = fpu_check_invalid(ST(nextop&7).d / ST0.d, ST(nextop&7).d, ST0.d);
-            if(!emu->cw.f.C87_PC) ST(nextop&7).d = (float)ST(nextop&7).d;
+            if(!emu->cw.f.C87_PC) ST(nextop&7).d = fpu_narrow(ST(nextop&7).d);
             break;
         default:
             fesetround(oldround);

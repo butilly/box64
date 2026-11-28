@@ -455,7 +455,7 @@ uintptr_t dynarec64_00_2(dynarec_la64_t* dyn, uintptr_t addr, uintptr_t ip, int 
                     }
                 } else {
                     addr = geted(dyn, addr, ninst, nextop, &ed, x2, x1, &fixedaddress, rex, &lock, 1, 0);
-                    if(!lock && BOX64ENV(unity) && !VolatileRangesContains(ip) && ((fixedaddress==0x80) || (fixedaddress==0x84) || (fixedaddress==0xc0) || (fixedaddress==0xc4))) {
+                    if(!lock && VolatileFenceNeedsUnityFence(ip, fixedaddress)) {
                         DMB_ISH();
                         lock = 1;
                     }
@@ -513,7 +513,7 @@ uintptr_t dynarec64_00_2(dynarec_la64_t* dyn, uintptr_t addr, uintptr_t ip, int 
                 MVxw(gd, ed);
             } else {
                 addr = geted(dyn, addr, ninst, nextop, &ed, x2, x1, &fixedaddress, rex, &lock, 1, 0);
-                if(!lock && BOX64ENV(unity) && !VolatileRangesContains(ip) && ((fixedaddress==0x80) || (fixedaddress==0x84) || (fixedaddress==0xc0) || (fixedaddress==0xc4))) {
+                if(!lock && VolatileFenceNeedsUnityFence(ip, fixedaddress)) {
                     lock = 1;
                 }
                 SMREADLOCK(lock);
@@ -605,7 +605,6 @@ uintptr_t dynarec64_00_2(dynarec_la64_t* dyn, uintptr_t addr, uintptr_t ip, int 
             switch ((nextop >> 3) & 7) {
                 case 0:
                     INST_NAME("POP Ed");
-                    MARK_LEAF_RSP(LEAF_RSP_PUSHPOP);
                     SMREAD();
                     MARKREGsdz(xRSP);
                     if (MODREG) {
@@ -679,7 +678,6 @@ uintptr_t dynarec64_00_2(dynarec_la64_t* dyn, uintptr_t addr, uintptr_t ip, int 
             }
             break;
         case 0x9A:
-            MARK_LEAF_CALL();
             if (rex.is32bits) {
                 DEFAULT;
             } else {
@@ -716,7 +714,6 @@ uintptr_t dynarec64_00_2(dynarec_la64_t* dyn, uintptr_t addr, uintptr_t ip, int 
             break;
         case 0x9C:
             INST_NAME("PUSHF");
-            MARK_LEAF_RSP(LEAF_RSP_PUSHPOP);
             READFLAGS(X_ALL);
             RESTORE_EFLAGS(x1);
             if (!rex.is32bits) UP32_READ(xRSP);
@@ -724,7 +721,6 @@ uintptr_t dynarec64_00_2(dynarec_la64_t* dyn, uintptr_t addr, uintptr_t ip, int 
             break;
         case 0x9D:
             INST_NAME("POPF");
-            MARK_LEAF_RSP(LEAF_RSP_PUSHPOP);
             SETFLAGS(X_ALL, SF_SET_NODF, NAT_FLAGS_NOFUSION);
             if (!rex.is32bits) UP32_READ(xRSP);
             POP1z(xFlags);

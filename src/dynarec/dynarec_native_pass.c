@@ -19,10 +19,20 @@
 #include "dynablock_private.h"
 #include "custommem.h"
 #include "x64test.h"
-#include "pe_tools.h"
+#include "volatile_fences.h"
 
 #include "dynarec_arch.h"
 #include "dynarec_helper.h"
+
+#define READ_VOLATILE_FENCE()                                                                                     \
+    do {                                                                                                          \
+        int needs_fence;                                                                                          \
+        dyn->insts[ninst].x64.strongmem = VolatileFenceGetLevel(ip, BOX64DRENV(dynarec_strongmem), &needs_fence); \
+        dyn->insts[ninst].x64.volatile_fence = needs_fence;                                                       \
+    } while (0)
+#ifdef BOX64EC
+#include "box64ec.h"
+#endif
 
 #ifndef STEP
 #error No STEP defined
@@ -111,20 +121,17 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
     dyn->forward_to = 0;
     dyn->forward_size = 0;
     dyn->forward_ninst = 0;
+    #if !defined(RV64)
     dyn->ymm_zero = 0;
+    #endif
     dyn->is_file_mapped = IsAddrElfOrFileMapped(addr);
-    int dynarec_dirty = BOX64ENV(dynarec_dirty);
     #if STEP == 0
     memset(&dyn->insts[ninst], 0, sizeof(instruction_native_t));
     #endif
     fpu_reset(dyn);
     ARCH_INIT();
     int reset_n = -1; // -1 no reset; -2 reset to 0; else reset to the state of reset_n
-    #if defined(HAVE_LEAFCALL)
-    dyn->last_ip = (dyn->inline_leaf || alternate || (dyn->insts && dyn->insts[0].pred_sz)) ? 0 : ip; // RIP is always set at start of ordinary blocks unless there is a predecessor!
-    #else
     dyn->last_ip = (alternate || (dyn->insts && dyn->insts[0].pred_sz)) ? 0 : ip; // RIP is always set at start of block unless there is a predecessor!
-    #endif
     int stopblock = 2 + !dyn->is_file_mapped;                          // if block is in elf memory or file mapped memory, it can be extended with BOX64DRENV(dynarec_bigblock)==2, else it needs 3
     // ok, go now
     INIT;
@@ -132,10 +139,6 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
     uintptr_t cur_page = ALIGN_DOWN(addr);
     #endif
     while(ok) {
-        #if STEP > 0 && defined(HAVE_LEAFCALL)
-        if (dyn->inline_leaf)
-            addr = dyn->insts[ninst].x64.addr;
-        #endif
         #if STEP == 0
         int stop_for_guard = 0;
         if(cur_page != (ALIGN_DOWN(addr))) {
@@ -168,31 +171,22 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
             NATIVE_RESTORE_X87PC();
         }
         ip = addr;
-        #ifdef ARM64
+        #if defined(ARM64) || defined(LA64) || defined(RV64)
         if(!ninst) {
-            if (BOX64DRENV(dynarec_callret) >= 2)
+            if (BOX64DRENV(dynarec_callret) >= 3)
                 doEnterBlock(dyn, 0, x1, x2, x3);
             if(dyn->always_test)
                 checkCRC(dyn, 0);
-            if(dyn->insts[0].preload_xmmymm)
-                doPreload(dyn, 0);
-            ENDPREFIX;
-        }
-        #elif defined(LA64)
-        if(!ninst) {
-            if (BOX64DRENV(dynarec_callret) >= 2)
-                doEnterBlock(dyn, 0, x1, x2, x3);
-            if(dyn->always_test)
-                checkCRC(dyn, 0);
+            #if defined(RV64)
+            #if STEP > 0
+            if (dyn->simd_used) simd_prepare_entry(dyn, 0, 1);
+            #endif
+            #else
             if(dyn->insts[0].preload_xmmymm) {
                 doPreload(dyn, 0);
             }
+            #endif
             ENDPREFIX;
-        }
-        #elif defined(RV64)
-        if(!ninst) {
-            if (BOX64DRENV(dynarec_callret) >= 2)
-                doEnterBlock(dyn, 0, x1, x2, x3);
         }
         #endif
         fpu_propagate_stack(dyn, ninst);
@@ -222,7 +216,19 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
             dyn->last_ip = 0;   // reset IP if some jump are coming here
         #endif
         MESSAGE(LOG_DUMP, "New Instruction %s:%p, native:%p\n", is32bits?"x86":"x64",(void*)addr, (void*)dyn->block);
+        #if defined(RV64) && STEP > 0
+        if (dyn->simd_used) simd_prepare_entry(dyn, ninst, 0);
+        #endif
         NEW_INST;
+        #if defined(BOX64EC) && STEP > 1
+        // linked blocks and backward jumps can loop without leaving the JIT: check the suspend doorbell at
+        // block entry and before backward jumps (not inside a SEVL/WFE pair), x1 is free between opcodes
+        if (!dyn->insts[ninst].wfe && (!ninst || (dyn->insts[ninst].x64.jmp && dyn->insts[ninst].x64.jmp <= ip))) {
+            LDRw_U12(x1, xEmu, offsetof(x64emu_t, suspend_doorbell));
+            CBZw(x1, 8);
+            UDF(BOX64EC_JIT_SUSPEND_OPCODE);
+        }
+        #endif
         #ifdef ARCH_NOP
         if(dyn->insts[ninst].x64.alive && dyn->insts[ninst].x64.self_loop)
             CALLRET_LOOP();
@@ -237,10 +243,31 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
         } else if (dyn->insts[ninst].will_write) {
             WILLWRITE();
         }
+        #endif
+        #if STEP > 1 || (STEP == 1 && defined(ARM64))
+        int is_opcode_volatile = dyn->insts[ninst].x64.volatile_fence;
+        #endif
+        #if defined(ARM64) && STEP == 1
+        if(is_opcode_volatile && cpuext.lrcpc && cpuext.lrcpc2 && cpuext.uscat) dyn->insts[ninst].use_lrcpc = 1;
+        #endif
+        #if STEP > 1
+        #ifdef ARM64
+        if (is_opcode_volatile && dyn->insts[ninst].use_lrcpc && dyn->insts[ninst].lock)
+            NOLRCPC();
+        #endif
+        if (is_opcode_volatile && !dyn->insts[ninst].lock) {
+            #ifdef ARM64
+            if(!dyn->insts[ninst].use_lrcpc) {
+            #endif
+            if(dyn->insts[ninst].will_write)
+                DMB_ISHST();
+            #ifdef ARM64
+            } else {
+                SMEND();
+            }
+            #endif
+        }
 
-        int is_opcode_volatile = /*box64_wine &&*/ VolatileRangesContains(ip) && VolatileOpcodesHas(ip);
-        if (is_opcode_volatile && !dyn->insts[ninst].lock && dyn->insts[ninst].will_write)
-            DMB_ISHST();
         #endif
         if (BOX64DRENV(dynarec_dump) && (!BOX64ENV(dynarec_dump_range_end) || (ip >= BOX64ENV(dynarec_dump_range_start) && ip < BOX64ENV(dynarec_dump_range_end)))) {
             dyn->need_dump = BOX64DRENV(dynarec_dump) == 3 && STEP != 3 ? 0 : BOX64DRENV(dynarec_dump);
@@ -251,7 +278,7 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
             MESSAGE(LOG_DUMP, "TEST STEP ----\n");
             extcache_native_t save;
             fpu_save_and_unwind(dyn, ninst, &save);
-            #ifdef LA64
+            #if defined(LA64) || defined(RV64)
             UP32_READALL();
             #endif
             fpu_reflectcache(dyn, ninst, x1, x2, x3);
@@ -268,7 +295,7 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
                 #if defined (SPILL_NF_REGISTERS)
                 if (BOX64ENV(dynarec_nativeflags)) SPILL_NF_REGISTERS;
                 #endif
-                #ifdef LA64
+                #if defined(LA64) || defined(RV64)
                 UP32_READALL();
                 #endif
                 fpu_reflectcache(dyn, ninst, x1, x2, x3);
@@ -320,26 +347,28 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
             addr = dynarec64_00(dyn, addr, ip, ninst, rex, &ok, &need_epilog);
         if(dyn->abort)
             return ip;
-        INST_EPILOG;
-
-        #if STEP == 0 && defined(HAVE_LEAFCALL)
-        if (!dyn->peeking_flags && BOX64DRENV(dynarec_callret) >= 3 && dyn->insts[ninst].x64.leaf_kind == LEAF_KIND_CALL && dyn->insts[ninst].x64.leaf_target) {
-            dyn->insts[ninst].x64.leaf_call = 1;
-        }
+        #if defined(RV64) && STEP == 2
+        dyn->insts[ninst].epilog = dyn->native_size;
         #endif
+        #if defined(RV64) && STEP > 0
+        if (ok > 0 && dyn->simd_used) simd_prepare_entry(dyn, ninst + 1, 1);
+        #endif
+        INST_EPILOG;
 
         #if STEP > 1
         if (dyn->insts[ninst].lock)
             DMB_ISH();
-        else if (is_opcode_volatile && dyn->insts[ninst].will_read)
-            DMB_ISHLD();
+        else if (is_opcode_volatile) {
+            #ifdef ARM64
+            if(!dyn->insts[ninst].use_lrcpc) {
+            #endif
+            if(dyn->insts[ninst].will_read)
+                DMB_ISHLD();
+            #ifdef ARM64
+            }
+            #endif
+        } 
         #endif
-        #if defined(ARM64) || defined(LA64)
-        if(dyn->insts[ninst].x64.has_next && dyn->insts[ninst+1].preload_xmmymm) {
-            doPreload(dyn, ninst+1);
-        }
-        #endif
-
         fpu_reset_scratch(dyn);
         int next = ninst+1;
         #if STEP > 0
@@ -359,12 +388,17 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
                 dyn->last_ip = 0;
             }
         }
+        #if defined(ARM64) || defined(LA64)
+        if(dyn->insts[ninst].x64.has_next && dyn->insts[ninst+1].preload_xmmymm) {
+            doPreload(dyn, ninst+1);
+        }
+        #endif
         #endif
         #ifndef PROT_READ
         #define PROT_READ 1
         #endif
         #if STEP == 0
-        if(dynarec_dirty && ok && is_addr_autosmc(ip)) {
+        if(ok && is_addr_autosmc(ip)) {
             // this is the last opcode, because it will write in current block if not stopped
             ok = 0;
             need_epilog = 1;
@@ -387,6 +421,7 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
                     addr += dyn->insts[ninst].x64.size;
                     INST_EPILOG;
                 }
+                if ((ninst + 1) < dyn->size) dyn->insts[ninst + 1].x64.barrier |= BARRIER_FLOAT;
             }
             if((dyn->insts[ninst+1].x64.barrier&BARRIER_FULL)==BARRIER_FULL)
                 reset_n = -2;    // hack to say Barrier!
@@ -551,60 +586,3 @@ uintptr_t native_pass(dynarec_native_t* dyn, uintptr_t addr, int alternate, int 
     MESSAGE(LOG_DUMP, "---- END OF BLOCK ---- (%d)\n", dyn->size);
     return addr;
 }
-
-#ifdef HAVE_LEAFCALL
-void emit_inline_leaf(dynarec_native_t* parent, int parent_ninst)
-{
-    dynarec_native_t* leaf = dynarec_get_leaf_embedded(parent, parent_ninst);
-    if (!leaf) {
-        parent->abort = 1;
-        return;
-    }
-
-    leaf->block = parent->block;
-    leaf->native_start = parent->native_start;
-    leaf->native_size = parent->native_size;
-    leaf->table64 = parent->table64;
-    leaf->table64size = parent->table64size;
-    leaf->table64cap = parent->table64cap;
-    leaf->tablestart = parent->tablestart;
-    leaf->jmp_next = parent->jmp_next;
-    leaf->dynablock = parent->dynablock;
-    leaf->callrets = parent->callrets;
-    leaf->callret_size = parent->callret_size;
-    leaf->need_dump = parent->need_dump;
-    leaf->need_reloc = parent->need_reloc;
-    leaf->relocs = parent->relocs;
-    leaf->reloc_size = parent->reloc_size;
-    leaf->inline_native_end = parent->insts[parent_ninst].mark[2];
-    leaf->insts_size = 0;
-    leaf->abort = 0;
-
-    size_t native_start = leaf->native_size;
-    native_pass(leaf, leaf->start, 0, leaf->inline_is32bits, leaf->size);
-    size_t native_delta = leaf->native_size - native_start;
-
-    parent->block = leaf->block;
-    parent->native_size = leaf->native_size;
-    parent->table64size = leaf->table64size;
-    parent->callret_size = leaf->callret_size;
-    parent->reloc_size = leaf->reloc_size;
-    parent->abort |= leaf->abort;
-
-    #if STEP == 1
-    POSTUPDATE_SPECIFICS(leaf);
-    #elif STEP == 2
-    parent->insts[parent_ninst].size += native_delta;
-    if (leaf->insts_size > LEAFCALL_INSTSIZE_SCRATCH)
-        parent->abort = 1;
-    #elif STEP == 3
-    parent->insts[parent_ninst].size2 += native_delta;
-    for (int i = 0; i < leaf->size; ++i) {
-        if (!leaf->insts[i].x64.alive)
-            continue;
-        if (leaf->insts[i].size2 != leaf->insts[i].size)
-            parent->abort = 1;
-    }
-    #endif
-}
-#endif

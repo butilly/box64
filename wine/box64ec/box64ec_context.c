@@ -127,6 +127,7 @@ void context_to_emu(ARM64EC_NT_CONTEXT* context, x64emu_t* emu)
 {
     const void* ymm;
 
+    emu->live_mxcsr = emu->live_fpcr = BOX64EC_MXCSR_UNKNOWN;   // not known after a reload
     if ((context->ContextFlags & CONTEXT_INTEGER) == CONTEXT_INTEGER) {
         R_RAX = context->X8;
         R_RCX = context->X0;
@@ -170,6 +171,53 @@ void context_to_emu(ARM64EC_NT_CONTEXT* context, x64emu_t* emu)
     }
     emu->win64_teb = (uint64_t)NtCurrentTeb();
     emu->segs_offs[_GS] = (uintptr_t)emu->win64_teb;
+}
+
+// the guest registers of a fault in JIT code are in the JIT register map
+void jit_arm_context_to_emu(ARM64_NT_CONTEXT* context, x64emu_t* emu)
+{
+    R_RAX = context->X10;
+    R_RCX = context->X11;
+    R_RDX = context->X12;
+    R_RBX = context->X8;
+    R_RSP = context->X20;
+    R_RBP = context->X21;
+    R_RSI = context->X16;
+    R_RDI = context->X17;
+    R_R8  = context->X15;
+    R_R9  = context->X6;
+    R_R10 = context->X23;
+    R_R11 = context->X9;
+    R_R12 = context->X22;
+    R_R13 = context->X25;
+    R_R14 = context->X26;
+    R_R15 = context->X19;
+    emu->eflags.x64 = context->X7;
+    // JIT code keeps the CALLRET stack pointer in x28, anything else is not live
+    if (context->X28 >= emu->callret_stack && context->X28 <= emu->callret_stack + emu->callret_size)
+        emu->callret_sp = context->X28;
+}
+
+void emu_to_jit_arm_context(x64emu_t* emu, ARM64_NT_CONTEXT* context)
+{
+    context->X10 = R_RAX;
+    context->X11 = R_RCX;
+    context->X12 = R_RDX;
+    context->X8  = R_RBX;
+    context->X20 = R_RSP;
+    context->X21 = R_RBP;
+    context->X16 = R_RSI;
+    context->X17 = R_RDI;
+    context->X15 = R_R8;
+    context->X6  = R_R9;
+    context->X23 = R_R10;
+    context->X9  = R_R11;
+    context->X22 = R_R12;
+    context->X25 = R_R13;
+    context->X26 = R_R14;
+    context->X19 = R_R15;
+    context->X7  = emu->eflags.x64;
+    context->X27 = R_RIP;
 }
 
 void emu_to_context(x64emu_t* emu, ARM64EC_NT_CONTEXT* context)
@@ -232,19 +280,33 @@ static void write_live_mxcsr(uint32_t mxcsr)
         __os_arm64x_set_x64_information(0, mxcsr, NULL);
 }
 
+/* Remember the MXCSR known to be live: guest code rarely changes it */
 x64emu_t* Box64EC_ApplyLiveMxcsr(x64emu_t* emu)
 {
-    if (emu)
+    if (emu && emu->live_mxcsr != emu->mxcsr.x32) {
         write_live_mxcsr(emu->mxcsr.x32);
+        emu->live_mxcsr = emu->mxcsr.x32;
+        emu->live_fpcr = BOX64EC_MXCSR_UNKNOWN;
+    }
     return emu;
 }
 
 x64emu_t* Box64EC_CaptureLiveMxcsr(x64emu_t* emu)
 {
+    uint64_t fpcr, fpsr;
     uint32_t mxcsr;
 
-    if (emu && read_live_mxcsr(&mxcsr))
-        emu->mxcsr.x32 = mxcsr;
+    if (!emu)
+        return emu;
+    /* FPCR/FPSR key live_mxcsr, so arm64_ec_fast_resume can skip the getter */
+    __asm__ __volatile__("mrs %0, fpcr" : "=r"(fpcr));
+    __asm__ __volatile__("mrs %0, fpsr" : "=r"(fpsr));
+    if (read_live_mxcsr(&mxcsr)) {
+        emu->mxcsr.x32 = emu->live_mxcsr = mxcsr;
+        emu->live_fpcr = (uint32_t)fpcr;
+        emu->live_fpsr = (uint32_t)fpsr;
+    } else
+        emu->live_fpcr = BOX64EC_MXCSR_UNKNOWN;
     return emu;
 }
 
@@ -260,8 +322,17 @@ void Box64EC_CaptureContextMxcsr(ARM64EC_NT_CONTEXT* context)
 
 void Box64EC_ApplyContextMxcsr(ARM64EC_NT_CONTEXT* context)
 {
-    if (context)
-        write_live_mxcsr(context->AMD64_MxCsr);
+    CHPE_V2_CPU_AREA_INFO* area;
+    x64emu_t* emu;
+
+    if (!context)
+        return;
+    write_live_mxcsr(context->AMD64_MxCsr);
+    /* The live value no longer follows this thread's emu */
+    area = Box64EC_GetCpuArea();
+    emu = area ? (x64emu_t*)area->EmulatorData[EC_DATA_EMU] : NULL;
+    if (emu)
+        emu->live_mxcsr = emu->live_fpcr = BOX64EC_MXCSR_UNKNOWN;
 }
 
 void merge_eflags_from_emu(x64emu_t* emu, ARM64EC_NT_CONTEXT* context)

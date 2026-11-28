@@ -918,7 +918,7 @@ GOM(CRYPTO_set_locking_callback, vFEp)
 //GO(CRYPTO_set_mem_debug_functions, 
 //GO(CRYPTO_set_mem_debug_options, 
 //GO(CRYPTO_set_mem_ex_functions, 
-//GOM(CRYPTO_set_mem_functions, iFEppp)
+GOM(CRYPTO_set_mem_functions, iFEppp)
 GO(CRYPTO_strdup, pFppi)
 //GO(CRYPTO_thread_id, 
 //GO(CRYPTO_THREADID_cmp, 
@@ -2999,7 +2999,7 @@ GOM(PEM_X509_INFO_read_bio, pFEpppp)
 //GO(PKCS12_BAGS_new, 
 //GO(PKCS12_certbag2x509, 
 //GO(PKCS12_certbag2x509crl, 
-GO(PKCS12_create, pFppppp)
+GO(PKCS12_create, pFpppppiiiii)
 //GO(PKCS12_decrypt_skey, 
 GO(PKCS12_free, vFp)
 //GO(PKCS12_gen_mac, 

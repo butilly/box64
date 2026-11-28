@@ -135,14 +135,12 @@ uintptr_t dynarec64_AVX_F2_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
             GETGX();
             GETVX();
             GETED(0);
-            u8 = sse_setround(dyn, ninst, x6, x4);
             d0 = fpu_get_scratch(dyn);
             if (rex.w) {
                 FCVTDL(d0, ed, RD_DYN);
             } else {
                 FCVTDW(d0, ed, RD_DYN);
             }
-            x87_restoreround(dyn, ninst, u8);
             if (gd != vex.v) {
                 LD(x2, vback, vxoffset + 0);
                 LD(x3, vback, vxoffset + 8);
@@ -155,12 +153,12 @@ uintptr_t dynarec64_AVX_F2_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
         case 0x2C:
             INST_NAME("VCVTTSD2SI Gd, Ex");
             nextop = F8;
-            GETGD;
+            GETGDd;
             d0 = fpu_get_scratch(dyn);
             if (MODREG) {
                 ed = (nextop & 7) + (rex.b << 3);
-                sse_forget_reg(dyn, ninst, x1, ed);
-                FLD(d0, xEmu, offsetof(x64emu_t, xmm[ed]));
+                simd_forget_fp_reg(dyn, ninst, x1, ed);
+                FLD(d0, xEmu, XMMOFF(ed));
             } else {
                 addr = geted(dyn, addr, ninst, nextop, &wback, x2, x1, &fixedaddress, rex, NULL, 0, 0);
                 FLD(d0, wback, fixedaddress);
@@ -184,12 +182,12 @@ uintptr_t dynarec64_AVX_F2_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
         case 0x2D:
             INST_NAME("VCVTSD2SI Gd, Ex");
             nextop = F8;
-            GETGD;
+            GETGDd;
             d0 = fpu_get_scratch(dyn);
             if (MODREG) {
                 ed = (nextop & 7) + (rex.b << 3);
-                sse_forget_reg(dyn, ninst, x1, ed);
-                FLD(d0, xEmu, offsetof(x64emu_t, xmm[ed]));
+                simd_forget_fp_reg(dyn, ninst, x1, ed);
+                FLD(d0, xEmu, XMMOFF(ed));
             } else {
                 addr = geted(dyn, addr, ninst, nextop, &wback, x2, x1, &fixedaddress, rex, NULL, 0, 0);
                 FLD(d0, wback, fixedaddress);
@@ -197,10 +195,8 @@ uintptr_t dynarec64_AVX_F2_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
             if (!BOX64ENV(dynarec_fastround)) {
                 FSFLAGSI(0); // reset all bits
             }
-            u8 = sse_setround(dyn, ninst, x2, x3);
             FCVTLDxw(gd, d0, RD_DYN);
             if (!rex.w) ZEROUP(gd);
-            x87_restoreround(dyn, ninst, u8);
             if (!BOX64ENV(dynarec_fastround)) {
                 FRFLAGS(x5); // get back FPSR to check the IOC bit
                 ANDI(x5, x5, (1 << FR_NV) | (1 << FR_OF));
@@ -336,15 +332,9 @@ uintptr_t dynarec64_AVX_F2_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
             v1 = fpu_get_scratch(dyn);
             FLD(v0, vback, vxoffset + 0);
             FLD(v1, wback, fixedaddress + 0);
-            FEQD(x2, v0, v0);
-            FEQD(x3, v1, v1);
-            AND(x2, x2, x3);
-            BEQ_MARK(x2, xZR);
-            FLED(x2, v1, v0);
-            BEQ_MARK2(x2, xZR);
-            MARK;
+            FLTD(x2, v0, v1);
+            BNEZ(x2, 8);
             FMVD(v0, v1);
-            MARK2;
             FSD(v0, gback, gdoffset + 0);
             if (gd != vex.v) {
                 LD(x3, vback, vxoffset + 8);
@@ -410,7 +400,7 @@ uintptr_t dynarec64_AVX_F2_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
                 SRLI(x4, x4, 29);
                 MOV32w(x5, 0x007fffff);
                 AND(x4, x4, x5);
-                LUI(x5, 0x7fc00);
+                MOV32w(x5, 0x7FC00000);
                 OR(x4, x4, x5);
                 OR(x4, x4, x6);
                 FMVWX(v0, x4);
@@ -435,15 +425,9 @@ uintptr_t dynarec64_AVX_F2_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
             v1 = fpu_get_scratch(dyn);
             FLD(v0, vback, vxoffset + 0);
             FLD(v1, wback, fixedaddress + 0);
-            FEQD(x2, v0, v0);
-            FEQD(x3, v1, v1);
-            AND(x2, x2, x3);
-            BEQ_MARK(x2, xZR);
-            FLED(x2, v0, v1);
-            BEQ_MARK2(x2, xZR);
-            MARK;
+            FLTD(x2, v1, v0);
+            BNEZ(x2, 8);
             FMVD(v0, v1);
-            MARK2;
             FSD(v0, gback, gdoffset + 0);
             if (gd != vex.v) {
                 LD(x3, vback, vxoffset + 8);
@@ -598,7 +582,7 @@ uintptr_t dynarec64_AVX_F2_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
         case 0x7D:
             INST_NAME("VHSUBPS Gx, Vx, Ex");
             nextop = F8;
-            GETEX(x2, 0, vex.l ? 24 : 8);
+            GETEX(x2, 0, vex.l ? 28 : 12);
             GETGX();
             GETGY();
             GETVX();
@@ -748,8 +732,8 @@ uintptr_t dynarec64_AVX_F2_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
             d1 = fpu_get_scratch(dyn);
             if (MODREG) {
                 ed = (nextop & 7) + (rex.b << 3);
-                sse_forget_reg(dyn, ninst, x3, ed);
-                FLD(d0, xEmu, offsetof(x64emu_t, xmm[ed]));
+                simd_forget_fp_reg(dyn, ninst, x3, ed);
+                FLD(d0, xEmu, XMMOFF(ed));
             } else {
                 addr = geted(dyn, addr, ninst, nextop, &wback, x2, x3, &fixedaddress, rex, NULL, 1, 0);
                 FLD(d0, wback, fixedaddress);
@@ -781,7 +765,7 @@ uintptr_t dynarec64_AVX_F2_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
         case 0x7C:
             INST_NAME("VHADDPS Gx, Vx, Ex");
             nextop = F8;
-            GETEX(x2, 0, vex.l ? 24 : 8);
+            GETEX(x2, 0, vex.l ? 28 : 12);
             GETGX();
             GETGY();
             GETVX();
@@ -938,13 +922,12 @@ uintptr_t dynarec64_AVX_F2_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
             GETEX(x2, 0, vex.l ? 24 : 8);
             GETGX();
             d0 = fpu_get_scratch(dyn);
-            u8 = sse_setround(dyn, ninst, x6, x4);
             for (int i = 0; i < 2; ++i) {
                 FLD(d0, wback, fixedaddress + 8 * i);
                 FCVTLD(x3, d0, RD_DYN);
                 SEXT_W(x5, x3);
                 BEQ(x5, x3, 8);
-                LUI(x3, 0x80000);
+                MOV64x(x3, (int64_t)INT32_MIN);
                 SW(x3, gback, gdoffset + 4 * i);
             }
             if (vex.l) {
@@ -954,14 +937,13 @@ uintptr_t dynarec64_AVX_F2_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip,
                     FCVTLD(x3, d0, RD_DYN);
                     SEXT_W(x5, x3);
                     BEQ(x5, x3, 8);
-                    LUI(x3, 0x80000);
+                    MOV64x(x3, (int64_t)INT32_MIN);
                     SW(x3, gback, gdoffset + 8 + 4 * i);
                 }
             } else {
                 SW(xZR, gback, gdoffset + 8);
                 SW(xZR, gback, gdoffset + 12);
             }
-            x87_restoreround(dyn, ninst, u8);
             YMM0(gd);
             break;
         case 0xF0:

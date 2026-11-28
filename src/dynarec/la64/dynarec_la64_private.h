@@ -66,6 +66,7 @@ typedef struct lsxcache_s {
     uint8_t         pushed;         // positive pushed value (to check for overflow)
     uint8_t         poped;          // positive poped value (to check for underflow)
     uint32_t        news;           // bitmask, wich neoncache are new for this opcode
+    lsx_cache_t     olds[24];       // entry descriptor of slots changed or removed by this opcode
     // fpu cache
     int8_t          x87cache[8];    // cache status for the 8 x87 register behind the fpu stack
     int8_t          x87reg[8];      // reg used for x87cache entry
@@ -74,6 +75,7 @@ typedef struct lsxcache_s {
     sse_cache_t     ssecache[16];   // cache status for the 16 SSE(2) registers
     avx_cache_t     avxcache[16];   // cache status for the 16 YMM registers
     int8_t          scalarcache[16]; // pending "scalar" register for each XMM
+    uint16_t        upper_clear_pending; // XMM upper lanes still to be cleared on merge
     int8_t          fpuused[24];    // all 0..24 double reg from fpu, used by x87, sse and mmx
     int8_t          x87stack;       // cache stack counter
     int8_t          mmxcount;       // number of mmx register used (not both mmx and x87 at the same time)
@@ -214,9 +216,6 @@ typedef struct dynarec_la64_s {
     size_t               insts_size; // size of the instruction size array (calculated)
     int                  callret_size;   // size of the array
     callret_t*           callrets;   // array of callret return, with NOP / UDF depending if the block is clean or dirty
-    void*                leaf_embeddeds;
-    uintptr_t            inline_native_end;
-    int16_t              inline_rsp;
     uintptr_t            forward;    // address of the last end of code while testing forward
     uintptr_t            forward_to; // address of the next jump to (to check if everything is ok)
     int32_t              forward_size;   // size at the forward point
@@ -231,8 +230,6 @@ typedef struct dynarec_la64_s {
     uint8_t              use_ymm:1;
     uint8_t              no_scalar_renaming:1;
     uint8_t              is_file_mapped:1;
-    uint8_t              inline_leaf:1;
-    uint8_t              inline_is32bits:1;
     void*                gdbjit_block;
     uint32_t             need_x87check; // x87 low precision check
     int                  x87round_active; // we are in the middle of x87_setround and x87_restoreround

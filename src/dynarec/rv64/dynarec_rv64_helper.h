@@ -20,6 +20,10 @@
 #include "../emu/x64primop.h"
 #include "dynarec_rv64_consts.h"
 
+#ifndef ENDPREFIX
+#define ENDPREFIX
+#endif
+
 #define F8      *(uint8_t*)(addr++)
 #define F8S     *(int8_t*)(addr++)
 #define F16     *(uint16_t*)(addr += 2, addr - 2)
@@ -37,13 +41,130 @@
 // LOCK_* define
 #define LOCK_LOCK (int*)1
 
+#if STEP == 0
+#define UP32_READ(r)                                                                \
+    do {                                                                            \
+        if (IS_GPR(r)) dyn->insts[ninst].up32_read |= (uint16_t)(1 << (TO_X64(r))); \
+    } while (0)
+#define UP32_WRITE64(r)                                                                \
+    do {                                                                               \
+        if (IS_GPR(r)) dyn->insts[ninst].up32_write64 |= (uint16_t)(1 << (TO_X64(r))); \
+    } while (0)
+#define UP32_WRITE32(r)                                                     \
+    do {                                                                    \
+        if (IS_GPR(r)) {                                                    \
+            UP32_WRITE64(r);                                                \
+            dyn->insts[ninst].up32_write32 |= (uint16_t)(1 << (TO_X64(r))); \
+        }                                                                   \
+    } while (0)
+#define UP32_READALL()                                   \
+    do {                                                 \
+        dyn->insts[ninst].up32_read |= (uint16_t)0xFFFF; \
+    } while (0)
+#else
+#define UP32_READ(r)    ((void)(r))
+#define UP32_WRITE64(r) ((void)(r))
+#define UP32_WRITE32(r) ((void)(r))
+#define UP32_READALL()  ((void)0)
+#endif
+
+#if STEP == 1
+#define UP32_ZERO(r)                                                                \
+    do {                                                                            \
+        if (IS_GPR(r)) dyn->insts[ninst].up32_zero |= (uint16_t)(1 << (TO_X64(r))); \
+    } while (0)
+#else
+#define UP32_ZERO(r) ((void)(r))
+#endif
+
+#define ZEROUP_RESULT(r) \
+    do {                 \
+        ZEROUP(r);       \
+        UP32_ZERO(r);    \
+    } while (0)
+
+#define MARKREGd(r)          \
+    do {                     \
+        if (rex.w)           \
+            UP32_WRITE64(r); \
+        else                 \
+            UP32_WRITE32(r); \
+    } while (0)
+
+#define MARKREGdz(r)         \
+    do {                     \
+        if (!rex.is32bits)   \
+            UP32_WRITE64(r); \
+        else                 \
+            UP32_WRITE32(r); \
+    } while (0)
+
+#define MARKREGs(r)              \
+    do {                         \
+        if (rex.w) UP32_READ(r); \
+    } while (0)
+
+#define MARKREGsz(r)                     \
+    do {                                 \
+        if (!rex.is32bits) UP32_READ(r); \
+    } while (0)
+
+#define MARKREGsd(r) \
+    do {             \
+        MARKREGs(r); \
+        MARKREGd(r); \
+    } while (0)
+
+#define MARKREGsdz(r) \
+    do {              \
+        MARKREGsz(r); \
+        MARKREGdz(r); \
+    } while (0)
+
+#define NEED_ZEROUP32(r) \
+    (!(IS_GPR(r)) || !((dyn->insts[ninst].up32_skip >> (TO_X64(r))) & 1))
+#define NEED_ZEROUP(r) (!rex.w && NEED_ZEROUP32(r))
+
+#define ZEROUP32_RESULT(r)                      \
+    do {                                        \
+        UP32_WRITE32(r);                        \
+        if (NEED_ZEROUP32(r)) ZEROUP_RESULT(r); \
+    } while (0)
+
 // GETGD    get x64 register in gd
-#define GETGD gd = TO_NAT(((nextop & 0x38) >> 3) + (rex.r << 3))
-#define GETVD vd = TO_NAT(vex.v)
+#define GETGDw gd = TO_NAT(((nextop & 0x38) >> 3) + (rex.r << 3))
+#define GETGDs        \
+    do {              \
+        GETGDw;       \
+        MARKREGs(gd); \
+    } while (0)
+#define GETGD GETGDs
+#define GETGDd        \
+    do {              \
+        GETGDw;       \
+        MARKREGd(gd); \
+    } while (0)
+#define GETGDsd       \
+    do {              \
+        GETGDs;       \
+        MARKREGd(gd); \
+    } while (0)
+#define GETVDs              \
+    do {                    \
+        vd = TO_NAT(vex.v); \
+        MARKREGs(vd);       \
+    } while (0)
+#define GETVDsd             \
+    do {                    \
+        vd = TO_NAT(vex.v); \
+        MARKREGsd(vd);      \
+    } while (0)
+#define GETVD GETVDs
 // GETED can use r1 for ed, and r2 for wback. wback is 0 if ed is xEAX..xEDI
 #define GETED(D)                                                                                \
     if (MODREG) {                                                                               \
         ed = TO_NAT((nextop & 7) + (rex.b << 3));                                               \
+        MARKREGs(ed);                                                                           \
         wback = 0;                                                                              \
     } else {                                                                                    \
         SMREAD();                                                                               \
@@ -51,10 +172,16 @@
         LDxw(x1, wback, fixedaddress);                                                          \
         ed = x1;                                                                                \
     }
+#define GETEDsd(D)                \
+    do {                          \
+        GETED(D);                 \
+        if (MODREG) MARKREGd(ed); \
+    } while (0)
 // GETSED can use r1 for ed, and r2 for wback. ed will be sign extended!
 #define GETSED(D)                                                                               \
     if (MODREG) {                                                                               \
         ed = TO_NAT((nextop & 7) + (rex.b << 3));                                               \
+        MARKREGs(ed);                                                                           \
         wback = 0;                                                                              \
         if (!rex.w) {                                                                           \
             ADDW(x1, ed, xZR);                                                                  \
@@ -73,6 +200,7 @@
 #define GETEDx(D)                                                                               \
     if (MODREG) {                                                                               \
         ed = TO_NAT((nextop & 7) + (rex.b << 3));                                               \
+        UP32_READ(ed);                                                                          \
         wback = 0;                                                                              \
     } else {                                                                                    \
         SMREAD();                                                                               \
@@ -83,6 +211,7 @@
 #define GETEDz(D)                                                                               \
     if (MODREG) {                                                                               \
         ed = TO_NAT((nextop & 7) + (rex.b << 3));                                               \
+        MARKREGs(ed);                                                                           \
         wback = 0;                                                                              \
     } else {                                                                                    \
         SMREAD();                                                                               \
@@ -94,6 +223,7 @@
 #define GETEDH(hint, ret, D)                                                                       \
     if (MODREG) {                                                                                  \
         ed = TO_NAT((nextop & 7) + (rex.b << 3));                                                  \
+        MARKREGs(ed);                                                                              \
         wback = 0;                                                                                 \
     } else {                                                                                       \
         SMREAD();                                                                                  \
@@ -105,6 +235,7 @@
 #define GETEDW(hint, ret, D)                                                                       \
     if (MODREG) {                                                                                  \
         ed = TO_NAT((nextop & 7) + (rex.b << 3));                                                  \
+        MARKREGs(ed);                                                                              \
         MV(ret, ed);                                                                               \
         wback = 0;                                                                                 \
     } else {                                                                                       \
@@ -353,27 +484,27 @@
 // Get GX as a Single (might use x2)
 #define GETGXSS(a)                              \
     gd = ((nextop & 0x38) >> 3) + (rex.r << 3); \
-    a = sse_get_reg(dyn, ninst, x2, gd, 1)
+    a = simd_get_fp_reg(dyn, ninst, x2, gd, 1)
 
 // Get GX as a Single (might use x2), no fetching old value
 #define GETGXSS_empty(a)                        \
     gd = ((nextop & 0x38) >> 3) + (rex.r << 3); \
-    a = sse_get_reg_empty(dyn, ninst, x2, gd, 1)
+    a = simd_get_fp_reg_empty(dyn, ninst, x2, gd, 1)
 
 // Get GX as a Double (might use x2)
 #define GETGXSD(a)                              \
     gd = ((nextop & 0x38) >> 3) + (rex.r << 3); \
-    a = sse_get_reg(dyn, ninst, x2, gd, 0)
+    a = simd_get_fp_reg(dyn, ninst, x2, gd, 0)
 
 // Get GX as a Double (might use x2), no fetching old value
 #define GETGXSD_empty(a)                        \
     gd = ((nextop & 0x38) >> 3) + (rex.r << 3); \
-    a = sse_get_reg_empty(dyn, ninst, x2, gd, 0)
+    a = simd_get_fp_reg_empty(dyn, ninst, x2, gd, 0)
 
 // Get Ex as a single, not a quad (warning, x1 get used, x2 might too)
 #define GETEXSS(a, D)                                                                        \
     if (MODREG) {                                                                            \
-        a = sse_get_reg(dyn, ninst, x1, (nextop & 7) + (rex.b << 3), 1);                     \
+        a = simd_get_fp_reg(dyn, ninst, x1, (nextop & 7) + (rex.b << 3), 1);                 \
     } else {                                                                                 \
         SMREAD();                                                                            \
         a = fpu_get_scratch(dyn);                                                            \
@@ -384,7 +515,7 @@
 // Get Ex as a double, not a quad (warning, x1 get used, x2 might too)
 #define GETEXSD(a, D)                                                                        \
     if (MODREG) {                                                                            \
-        a = sse_get_reg(dyn, ninst, x1, (nextop & 7) + (rex.b << 3), 0);                     \
+        a = simd_get_fp_reg(dyn, ninst, x1, (nextop & 7) + (rex.b << 3), 0);                 \
     } else {                                                                                 \
         SMREAD();                                                                            \
         a = fpu_get_scratch(dyn);                                                            \
@@ -395,30 +526,30 @@
 // Will get pointer to GX in general register a, will purge SS or SD if loaded. May use x3. can use gback as load address
 #define GETGX()                                 \
     gd = ((nextop & 0x38) >> 3) + (rex.r << 3); \
-    sse_forget_reg(dyn, ninst, x3, gd);         \
+    simd_forget_fp_reg(dyn, ninst, x3, gd);     \
     gback = xEmu;                               \
-    gdoffset = offsetof(x64emu_t, xmm[gd])
+    gdoffset = XMMOFF(gd)
 
 #define GETGY()                                 \
     gd = ((nextop & 0x38) >> 3) + (rex.r << 3); \
-    /* TODO: forget */                          \
-    gyoffset = offsetof(x64emu_t, ymm[gd])
+    simd_flush_upper(dyn, ninst, x3, gd);       \
+    gyoffset = YMMOFF(gd)
 
-#define GETVX()                            \
-    sse_forget_reg(dyn, ninst, x3, vex.v); \
-    vback = xEmu;                          \
-    vxoffset = offsetof(x64emu_t, xmm[vex.v])
+#define GETVX()                                \
+    simd_forget_fp_reg(dyn, ninst, x3, vex.v); \
+    vback = xEmu;                              \
+    vxoffset = XMMOFF(vex.v)
 
-#define GETVY()        \
-    /* TODO: forget */ \
-    vyoffset = offsetof(x64emu_t, ymm[vex.v]);
+#define GETVY()                              \
+    simd_flush_upper(dyn, ninst, x3, vex.v); \
+    vyoffset = YMMOFF(vex.v);
 
 // Get Ex address in general register a, will purge SS or SD if it's reg and is loaded. May use x3. Use wback as load address!
 #define GETEX(a, D, I12)                                                                         \
     if (MODREG) {                                                                                \
         ed = (nextop & 7) + (rex.b << 3);                                                        \
-        sse_forget_reg(dyn, ninst, x3, ed);                                                      \
-        fixedaddress = offsetof(x64emu_t, xmm[ed]);                                              \
+        simd_forget_fp_reg(dyn, ninst, x3, ed);                                                  \
+        fixedaddress = XMMOFF(ed);                                              \
         wback = xEmu;                                                                            \
     } else {                                                                                     \
         SMREAD();                                                                                \
@@ -430,9 +561,9 @@
 #define GETEY()                                     \
     if (MODREG) {                                   \
         ed = (nextop & 7) + (rex.b << 3);           \
-        /* TODO: forget */                          \
+        simd_flush_upper(dyn, ninst, x3, ed);       \
         wback = xEmu;                               \
-        fixedaddress = offsetof(x64emu_t, ymm[ed]); \
+        fixedaddress = YMMOFF(ed); \
     } else {                                        \
         fixedaddress += 16;                         \
     }
@@ -441,8 +572,8 @@
 #define GETEX32(a, D, I12)                                                                         \
     if (MODREG) {                                                                                  \
         ed = (nextop & 7) + (rex.b << 3);                                                          \
-        sse_forget_reg(dyn, ninst, x3, ed);                                                        \
-        fixedaddress = offsetof(x64emu_t, xmm[ed]);                                                \
+        simd_forget_fp_reg(dyn, ninst, x3, ed);                                                    \
+        fixedaddress = XMMOFF(ed);                                                \
         wback = xEmu;                                                                              \
     } else {                                                                                       \
         SMREAD();                                                                                  \
@@ -453,48 +584,47 @@
 // Get GX as a quad (might use x1)
 #define GETGX_vector(a, w, sew)                 \
     gd = ((nextop & 0x38) >> 3) + (rex.r << 3); \
-    a = sse_get_reg_vector(dyn, ninst, x1, gd, w, sew)
+    a = simd_get_reg(dyn, ninst, x1, gd, w, sew)
 
 // Get EX as a quad, (x1 is used)
 #define GETEX_vector(a, w, D, sew)                                                           \
     if (MODREG) {                                                                            \
-        a = sse_get_reg_vector(dyn, ninst, x1, (nextop & 7) + (rex.b << 3), w, sew);         \
+        a = simd_get_reg(dyn, ninst, x1, (nextop & 7) + (rex.b << 3), w, sew);               \
     } else {                                                                                 \
         SMREAD();                                                                            \
         addr = geted(dyn, addr, ninst, nextop, &ed, x3, x2, &fixedaddress, rex, NULL, 0, D); \
-        a = fpu_get_scratch(dyn);                                                            \
+        a = vpu_get_scratch(dyn);                                                            \
         VLE_V(a, ed, sew, VECTOR_UNMASKED, VECTOR_NFIELD1);                                  \
     }
 
-#define SET_AVX_VECTOR_WIDTH(s1, sew) \
-    avx_set_vector_width(dyn, ninst, s1, sew, 16 << vex.l)
+#define SET_AVX_VECTOR_WIDTH(s1, sew) simd_set_width(dyn, ninst, s1, sew, 16 << vex.l)
 
-#define GETVY_vector(a, sew)                                             \
-    do {                                                                 \
-        a = fpu_get_scratch(dyn);                                        \
-        avx_load_reg_vector(dyn, ninst, x1, a, vex.v, 16 << vex.l, sew); \
+#define GETVY_vector(a, sew)                                       \
+    do {                                                           \
+        a = VREG(vex.v);                                           \
+        simd_load_reg(dyn, ninst, x1, a, vex.v, 16 << vex.l, sew); \
     } while (0)
 
-#define GETGY_vector(a, sew)                                          \
-    do {                                                              \
-        gd = ((nextop & 0x38) >> 3) + (rex.r << 3);                   \
-        a = fpu_get_scratch(dyn);                                     \
-        avx_load_reg_vector(dyn, ninst, x1, a, gd, 16 << vex.l, sew); \
+#define GETGY_vector(a, sew)                                    \
+    do {                                                        \
+        gd = ((nextop & 0x38) >> 3) + (rex.r << 3);             \
+        a = VREG(gd);                                           \
+        simd_load_reg(dyn, ninst, x1, a, gd, 16 << vex.l, sew); \
     } while (0)
 
 #define GETGY_empty_vector(a)                       \
     do {                                            \
         gd = ((nextop & 0x38) >> 3) + (rex.r << 3); \
-        a = fpu_get_scratch(dyn);                   \
+        a = simd_get_reg_empty(dyn, ninst, x1, gd); \
     } while (0)
 
 #define GETEY_vector(a, D, sew)                                                                  \
     do {                                                                                         \
-        a = fpu_get_scratch(dyn);                                                                \
         if (MODREG) {                                                                            \
-            avx_load_reg_vector(dyn, ninst, x1, a, (nextop & 7) + (rex.b << 3),                  \
-                16 << vex.l, sew);                                                               \
+            a = VREG((nextop & 7) + (rex.b << 3));                                               \
+            simd_load_reg(dyn, ninst, x1, a, (nextop & 7) + (rex.b << 3), 16 << vex.l, sew);     \
         } else {                                                                                 \
+            a = vpu_get_scratch(dyn);                                                            \
             SMREAD();                                                                            \
             addr = geted(dyn, addr, ninst, nextop, &ed, x3, x2, &fixedaddress, rex, NULL, 0, D); \
             SET_AVX_VECTOR_WIDTH(x1, sew);                                                       \
@@ -505,51 +635,143 @@
 // Get EY as a 128bits vector, even if vex.l is set
 #define GETEY128_vector(a, D, sew)                                                               \
     do {                                                                                         \
-        a = fpu_get_scratch(dyn);                                                                \
         if (MODREG) {                                                                            \
-            avx_load_reg_vector(dyn, ninst, x1, a, (nextop & 7) + (rex.b << 3), 16, sew);         \
+            a = VREG((nextop & 7) + (rex.b << 3));                                               \
+            simd_load_reg(dyn, ninst, x1, a, (nextop & 7) + (rex.b << 3), 16, sew);              \
         } else {                                                                                 \
+            a = vpu_get_scratch(dyn);                                                            \
             SMREAD();                                                                            \
             addr = geted(dyn, addr, ninst, nextop, &ed, x3, x2, &fixedaddress, rex, NULL, 0, D); \
-            avx_set_vector_width(dyn, ninst, x1, sew, 16);                                       \
+            simd_set_width(dyn, ninst, x1, sew, 16);                                             \
             VLE_V(a, ed, sew, VECTOR_UNMASKED, VECTOR_NFIELD1);                                  \
         }                                                                                        \
         SET_AVX_VECTOR_WIDTH(x1, sew);                                                           \
     } while (0)
 
+#define VEC_SRC_KEEP(a, dst)                  \
+    do {                                      \
+        if ((a) == (dst)) {                   \
+            int keep_ = vpu_get_scratch(dyn); \
+            VMV_V_V(keep_, (a));              \
+            (a) = keep_;                      \
+        }                                     \
+    } while (0)
+
+#define GETGY_empty_VYEY_vector_D(gx, vx, ex, sew, D) \
+    do {                                              \
+        GETVY_vector(vx, sew);                        \
+        GETEY_vector(ex, D, sew);                     \
+        GETGY_empty_vector(gx);                       \
+    } while (0)
+
+#define GETGY_empty_VYEY_vector(gx, vx, ex, sew) \
+    GETGY_empty_VYEY_vector_D(gx, vx, ex, sew, 0)
+
+#define GETGY_empty_VYEY_vector_safe(gx, vx, ex, sew) \
+    do {                                              \
+        GETVY_vector(vx, sew);                        \
+        GETEY_vector(ex, 0, sew);                     \
+        GETGY_empty_vector(gx);                       \
+        VEC_SRC_KEEP(vx, gx);                         \
+        VEC_SRC_KEEP(ex, gx);                         \
+    } while (0)
+
+#define VEC_SRC_SAFE(a, dst)                                          \
+    do {                                                              \
+        if ((a) == (dst)) {                                           \
+            int safe_ = vpu_get_scratch(dyn);                         \
+            simd_set_width(dyn, ninst, x1, VECTOR_SEW8, 16 << vex.l); \
+            VMV_V_V(safe_, (a));                                      \
+            (a) = safe_;                                              \
+        }                                                             \
+    } while (0)
+
 // Get EY as a vector of w bytes (for instructions whose source operand is narrower than the destination)
 #define GETEY_vector_w(a, D, sew, w)                                                             \
     do {                                                                                         \
-        a = fpu_get_scratch(dyn);                                                                \
         if (MODREG) {                                                                            \
-            avx_load_reg_vector(dyn, ninst, x1, a, (nextop & 7) + (rex.b << 3), w, sew);         \
+            a = VREG((nextop & 7) + (rex.b << 3));                                               \
+            simd_load_reg(dyn, ninst, x1, a, (nextop & 7) + (rex.b << 3), w, sew);               \
         } else {                                                                                 \
+            a = vpu_get_scratch(dyn);                                                            \
             SMREAD();                                                                            \
             addr = geted(dyn, addr, ninst, nextop, &ed, x3, x2, &fixedaddress, rex, NULL, 0, D); \
-            avx_set_vector_width(dyn, ninst, x1, sew, w);                                        \
+            simd_set_width(dyn, ninst, x1, sew, w);                                              \
             VLE_V(a, ed, sew, VECTOR_UNMASKED, VECTOR_NFIELD1);                                  \
         }                                                                                        \
     } while (0)
 
-#define PUTGY_vector(a, sew) \
-    avx_store_reg_vector(dyn, ninst, x1, a, gd, 16 << vex.l, sew)
+#define PUTGY_vector(a, sew) simd_store_reg(dyn, ninst, x1, a, gd, 16 << vex.l, sew)
 
-#define GETEX_PARTIAL_vector(a, w, D, sew, multiple)                                         \
+#define GETEX_PARTIAL_vector(a, w, D, sew, bytes)                                            \
     if (MODREG) {                                                                            \
-        SET_ELEMENT_WIDTH(x1, sew, 1);                                                       \
-        a = sse_get_reg_vector(dyn, ninst, x1, (nextop & 7) + (rex.b << 3), w, sew);         \
+        SET_ELEMENT_WIDTH(x1, sew);                                                          \
+        a = simd_get_reg(dyn, ninst, x1, (nextop & 7) + (rex.b << 3), w, sew);               \
     } else {                                                                                 \
-        vector_vsetvli(dyn, ninst, x1, sew, VECTOR_LMUL1, multiple);                         \
+        rvv_set_vl_for_width(dyn, ninst, x1, sew, VECTOR_LMUL1, bytes);                             \
         SMREAD();                                                                            \
         addr = geted(dyn, addr, ninst, nextop, &ed, x3, x2, &fixedaddress, rex, NULL, 0, D); \
-        a = fpu_get_scratch(dyn);                                                            \
+        a = vpu_get_scratch(dyn);                                                            \
         VLE_V(a, ed, sew, VECTOR_UNMASKED, VECTOR_NFIELD1);                                  \
-        dyn->vector_sew = VECTOR_SEWNA;                                                      \
     }
 
-#define GETEX64_vector(a, w, D, sew) GETEX_PARTIAL_vector(a, w, D, sew, 0.5)
-#define GETEX32_vector(a, w, D, sew) GETEX_PARTIAL_vector(a, w, D, sew, 0.25)
-#define GETEX16_vector(a, w, D, sew) GETEX_PARTIAL_vector(a, w, D, sew, 0.125)
+#define GETEX64_vector(a, w, D, sew) GETEX_PARTIAL_vector(a, w, D, sew, 8)
+#define GETEX32_vector(a, w, D, sew) GETEX_PARTIAL_vector(a, w, D, sew, 4)
+#define GETEX16_vector(a, w, D, sew) GETEX_PARTIAL_vector(a, w, D, sew, 2)
+
+#define VRGATHER_VX_SAFE(vd, vs2, rs1, vm) \
+    do {                                   \
+        int d_ = (vd), s_ = (vs2);         \
+        if (d_ == s_) {                    \
+            s_ = vpu_get_scratch(dyn);     \
+            VMV_V_V(s_, (vs2));            \
+        }                                  \
+        VRGATHER_VX(d_, s_, (rs1), (vm));  \
+    } while (0)
+
+#define VRGATHER_VV_SAFE(vd, vs2, vs1, vm)       \
+    do {                                         \
+        int d_ = (vd), s2_ = (vs2), s1_ = (vs1); \
+        if (d_ == s2_) {                         \
+            s2_ = vpu_get_scratch(dyn);          \
+            VMV_V_V(s2_, (vs2));                 \
+        }                                        \
+        if (d_ == s1_) {                         \
+            s1_ = vpu_get_scratch(dyn);          \
+            VMV_V_V(s1_, (vs1));                 \
+        }                                        \
+        VRGATHER_VV(d_, s2_, s1_, (vm));         \
+    } while (0)
+
+#define VSLIDEUP_VI_SAFE(vd, vs2, imm, vm) \
+    do {                                   \
+        int d_ = (vd), s_ = (vs2);         \
+        if (d_ == s_) {                    \
+            s_ = vpu_get_scratch(dyn);     \
+            VMV_V_V(s_, (vs2));            \
+        }                                  \
+        VSLIDEUP_VI(d_, s_, (imm), (vm));  \
+    } while (0)
+
+#define VSLIDEUP_VX_SAFE(vd, vs2, rs1, vm) \
+    do {                                   \
+        int d_ = (vd), s_ = (vs2);         \
+        if (d_ == s_) {                    \
+            s_ = vpu_get_scratch(dyn);     \
+            VMV_V_V(s_, (vs2));            \
+        }                                  \
+        VSLIDEUP_VX(d_, s_, (rs1), (vm));  \
+    } while (0)
+
+#define VSLIDE1UP_VX_SAFE(vd, vs2, rs1, vm) \
+    do {                                    \
+        int d_ = (vd), s_ = (vs2);          \
+        if (d_ == s_) {                     \
+            s_ = vpu_get_scratch(dyn);      \
+            VMV_V_V(s_, (vs2));             \
+        }                                   \
+        VSLIDE1UP_VX(d_, s_, (rs1), (vm));  \
+    } while (0)
 
 // Put Back EX if it was a memory and not an emm register
 #define PUTEX_vector(a, sew)                                \
@@ -590,9 +812,10 @@
     } else {                                                                                \
         SMREAD();                                                                           \
         addr = geted(dyn, addr, ninst, nextop, &ed, a, x3, &fixedaddress, rex, NULL, 1, D); \
-        a = fpu_get_scratch(dyn);                                                           \
-        FLD(a, ed, fixedaddress);                                                           \
-        VFMV_S_F(a, a);                                                                     \
+        int fp_ = fpu_get_scratch(dyn);                                                     \
+        a = vpu_get_scratch(dyn);                                                           \
+        FLD(fp_, ed, fixedaddress);                                                         \
+        VFMV_S_F(a, fp_);                                                                   \
     }
 
 // Put Back EM if it was a memory and not an mm register; requires SEW64
@@ -605,7 +828,7 @@
 
 #define GETGX_empty_vector(a)                   \
     gd = ((nextop & 0x38) >> 3) + (rex.r << 3); \
-    a = sse_get_reg_empty_vector(dyn, ninst, x1, gd)
+    a = simd_get_reg_empty(dyn, ninst, x1, gd)
 
 
 #define SSE_LOOP_D_ITEM(GX1, EX1, F, i)    \
@@ -757,6 +980,8 @@
 #define GETMARK2    GETMARKi(1)
 #define MARK3       MARKi(2)
 #define GETMARK3    GETMARKi(2)
+#define MARK4       MARKi(3)
+#define GETMARK4    GETMARKi(3)
 
 #define MARKFi(i)    dyn->insts[ninst].markf[i] = dyn->native_size
 #define GETMARKFi(i) dyn->insts[ninst].markf[i]
@@ -764,6 +989,9 @@
 #define GETMARKF     GETMARKFi(0)
 #define MARKF2       MARKFi(1)
 #define GETMARKF2    GETMARKFi(1)
+
+#define MARKFNAN     dyn->insts[ninst].markfnan = dyn->native_size
+#define GETMARKFNAN  dyn->insts[ninst].markfnan
 
 #define MARKSEG      dyn->insts[ninst].markseg = dyn->native_size
 #define GETMARKSEG   dyn->insts[ninst].markseg
@@ -829,6 +1057,12 @@
 #define BEQZ_MARK2(reg) BEQ_MARK2(reg, xZR)
 // Branch to MARK3 if reg1==0 (use j64)
 #define BEQZ_MARK3(reg) BEQ_MARK3(reg, xZR)
+// Branch to MARK4 if reg1!=reg2 (use j64)
+#define BNE_MARK4(reg1, reg2) Bxx_gen(NE, MARK4, reg1, reg2)
+// Branch to MARK4 if reg1!=0 (use j64)
+#define BNEZ_MARK4(reg) BNE_MARK4(reg, xZR)
+// Branch to MARK4 instruction unconditionnal (use j64)
+#define B_MARK4_nocond Bxx_gen(__, MARK4, 0, 0)
 // Branch to MARK3 instruction unconditionnal (use j64)
 #define B_MARK3_nocond Bxx_gen(__, MARK3, 0, 0)
 // Branch to MARKLOCK if reg1!=reg2 (use j64)
@@ -920,7 +1154,7 @@
     BNE_MARK2(xs, xZR);                             \
     FEQS(xt, vb, vb);                               \
     FMVS(v1, va);                                   \
-    Bxx_gen(NE, MARKF, xt, xZR);                    \
+    Bxx_gen(NE, MARKFNAN, xt, xZR);                 \
     FMVXW(xs, va);                                  \
     SLLIW(xs, xs, 9);                               \
     SRLIW(xs, xs, 9);                               \
@@ -931,25 +1165,25 @@
     BEQ_MARKLOCK(xs, xt);                           \
     Bxx_gen(LTU, MARKLOCK2, xs, xt);                \
     FMVS(v1, va);                                   \
-    Bxx_gen(__, MARKF, 0, 0);                       \
+    Bxx_gen(__, MARKFNAN, 0, 0);                    \
     MARKLOCK2;                                      \
     FMVS(v1, vb);                                   \
-    Bxx_gen(__, MARKF, 0, 0);                       \
+    Bxx_gen(__, MARKFNAN, 0, 0);                    \
     MARKLOCK;                                       \
     FMVXW(xs, va);                                  \
     SRLIW(xs, xs, 31);                              \
     BNEZ_MARKLOCK2(xs);                             \
     FMVS(v1, va);                                   \
-    Bxx_gen(__, MARKF, 0, 0);                       \
+    Bxx_gen(__, MARKFNAN, 0, 0);                    \
     MARK2;                                          \
     FEQS(xt, vb, vb);                               \
     BNE_MARK3(xt, xZR);                             \
     FMVS(v1, vb);                                   \
-    Bxx_gen(__, MARKF, 0, 0);                       \
+    Bxx_gen(__, MARKFNAN, 0, 0);                    \
     MARK3;                                          \
     FNEGS(v1, v1);                                  \
     Bxx_gen(__, MARK, 0, 0);                        \
-    MARKF;                                          \
+    MARKFNAN;                                       \
     FMVXW(xs, v1);                                  \
     BSETI(xs, xs, 22, xq);                          \
     FMVWX(v1, xs);                                  \
@@ -964,7 +1198,7 @@
     BNE_MARK2(xs, xZR);                             \
     FEQD(xt, vb, vb);                               \
     FMVD(v1, va);                                   \
-    Bxx_gen(NE, MARKF, xt, xZR);                    \
+    Bxx_gen(NE, MARKFNAN, xt, xZR);                 \
     FMVXD(xs, va);                                  \
     SLLI(xs, xs, 12);                               \
     BSETI(xs, xs, 63, xq);                          \
@@ -973,25 +1207,25 @@
     BEQ_MARKLOCK(xs, xt);                           \
     Bxx_gen(LTU, MARKLOCK2, xs, xt);                \
     FMVD(v1, va);                                   \
-    Bxx_gen(__, MARKF, 0, 0);                       \
+    Bxx_gen(__, MARKFNAN, 0, 0);                    \
     MARKLOCK2;                                      \
     FMVD(v1, vb);                                   \
-    Bxx_gen(__, MARKF, 0, 0);                       \
+    Bxx_gen(__, MARKFNAN, 0, 0);                    \
     MARKLOCK;                                       \
     FMVXD(xs, va);                                  \
     SRLI(xs, xs, 63);                               \
     BNEZ_MARKLOCK2(xs);                             \
     FMVD(v1, va);                                   \
-    Bxx_gen(__, MARKF, 0, 0);                       \
+    Bxx_gen(__, MARKFNAN, 0, 0);                    \
     MARK2;                                          \
     FEQD(xt, vb, vb);                               \
     BNE_MARK3(xt, xZR);                             \
     FMVD(v1, vb);                                   \
-    Bxx_gen(__, MARKF, 0, 0);                       \
+    Bxx_gen(__, MARKFNAN, 0, 0);                    \
     MARK3;                                          \
     FNEGD(v1, v1);                                  \
     Bxx_gen(__, MARK, 0, 0);                        \
-    MARKF;                                          \
+    MARKFNAN;                                       \
     FMVXD(xs, v1);                                  \
     BSETI(xs, xs, 51, xq);                          \
     FMVDX(v1, xs);                                  \
@@ -1014,6 +1248,20 @@
     OR(xs, xs, xt);                                            \
     FMVDX(d, xs);                                              \
     MARKSEG
+#endif
+
+#ifndef X87_DOUBLE_TO_FLOAT
+#define X87_DOUBLE_TO_FLOAT(d, sd, xs, xt) \
+    FMVXD(xs, sd);                         \
+    SRLI(xt, xs, 63);                      \
+    SLLI(xt, xt, 31);                      \
+    SRLI(xs, xs, 29);                      \
+    SLLI(xs, xs, 41);                      \
+    SRLI(xs, xs, 41);                      \
+    OR(xs, xs, xt);                        \
+    MOV32w(xt, 0x7FC00000);                \
+    OR(xs, xs, xt);                        \
+    FMVWX(d, xs)
 #endif
 
 #define STORE_REG(A) SD(x##A, xEmu, offsetof(x64emu_t, regs[_##A]))
@@ -1161,8 +1409,7 @@
 
 // Adjust the xFlags bit 5 -> bit 11, src and dst can be the same (and can be xFlags, but not s1)
 #define FLAGS_ADJUST_TO11(dst, src, s1) \
-    LUI(s1, 0xFFFFF);                   \
-    ADDIW(s1, s1, 0x7DF);               \
+    MOV64x(s1, 0xFFFFFFFFFFFFF7DF);     \
     AND(s1, src, s1);                   \
     ANDI(dst, src, 1 << 5);             \
     SLLI(dst, dst, 11 - 5);             \
@@ -1238,18 +1485,37 @@
     READFLAGS(A)
 #endif
 
-#define NAT_FLAGS_OPS(op1, op2, s1, s2)                                     \
-    do {                                                                    \
-        dyn->insts[dyn->insts[ninst].nat_next_inst].nat_flags_op1 = op1;    \
-        dyn->insts[dyn->insts[ninst].nat_next_inst].nat_flags_op2 = op2;    \
-        if (dyn->insts[ninst + 1].no_scratch_usage && IS_GPR(op1)) {        \
-            MV(s1, op1);                                                    \
-            dyn->insts[dyn->insts[ninst].nat_next_inst].nat_flags_op1 = s1; \
-        }                                                                   \
-        if (dyn->insts[ninst + 1].no_scratch_usage && IS_GPR(op2)) {        \
-            MV(s2, op2);                                                    \
-            dyn->insts[dyn->insts[ninst].nat_next_inst].nat_flags_op2 = s2; \
-        }                                                                   \
+#define NAT_FLAGS_OPS(op1, op2, s1, s2)                                              \
+    do {                                                                             \
+        int nat_op1 = op1;                                                           \
+        int nat_op2 = op2;                                                           \
+        int nat_next = dyn->insts[ninst].nat_next_inst;                              \
+        int nat_last = nat_next;                                                     \
+        while (nat_last && dyn->insts[nat_last].nat_next_inst)                       \
+            nat_last = dyn->insts[nat_last].nat_next_inst;                           \
+        int nat_copy = 0;                                                            \
+        for (int nat_i = ninst + 1; nat_i < nat_last; ++nat_i)                       \
+            if (dyn->insts[nat_i].no_scratch_usage) nat_copy = 1;                    \
+        if (nat_copy && IS_GPR(nat_op1)) {                                           \
+            if (dyn->insts[ninst].up32_read & (1 << TO_X64(nat_op1)))                \
+                MV(s1, nat_op1);                                                     \
+            else                                                                     \
+                ZEXTW2(s1, nat_op1);                                                 \
+            nat_op1 = s1;                                                            \
+        }                                                                            \
+        if (nat_copy && IS_GPR(nat_op2)) {                                           \
+            if (dyn->insts[ninst].up32_read & (1 << TO_X64(nat_op2)))                \
+                MV(s2, nat_op2);                                                     \
+            else                                                                     \
+                ZEXTW2(s2, nat_op2);                                                 \
+            nat_op2 = s2;                                                            \
+        }                                                                            \
+        for (int nat_i = nat_next; nat_i; nat_i = dyn->insts[nat_i].nat_next_inst) { \
+            dyn->insts[nat_i].nat_flags_op1 = nat_op1;                               \
+            dyn->insts[nat_i].nat_flags_op2 = nat_op2;                               \
+        }                                                                            \
+        for (int nat_i = ninst + 1; nat_i <= nat_last; ++nat_i)                      \
+            dyn->insts[nat_i].nat_flags_live = (1u << nat_op1) | (1u << nat_op2);    \
     } while (0)
 
 #define NAT_FLAGS_ENABLE_CARRY() dyn->insts[ninst].nat_flags_carry = 1
@@ -1262,7 +1528,7 @@
         GRABFLAGS(((dyn->insts[ninst].x64.gen_flags & X_PEND) ? X_ALL : dyn->insts[ninst].x64.gen_flags) & (~(A))); \
     if (dyn->insts[ninst].x64.gen_flags) switch (B) {                                                               \
             case SF_SET_DF: dyn->f = status_set; break;                                                             \
-            case SF_SET_NODF: SET_DFNONE(); break;                                                                  \
+            case SF_SET_NODF: break;                                                                                \
             case SF_SUBSET:                                                                                         \
             case SF_SUBSET_PENDING:                                                                                 \
             case SF_SET:                                                                                            \
@@ -1271,7 +1537,7 @@
                 SET_DFNONE();                                                                                       \
                 break;                                                                                              \
         }                                                                                                           \
-    else                                                                                                            \
+    else if ((B) != SF_SET_NODF)                                                                                    \
         SET_DFNONE();                                                                                               \
     dyn->insts[ninst].nat_flags_nofusion = (FUSION)
 #endif
@@ -1334,14 +1600,19 @@
 
 #define ARCH_INIT() \
     SMSTART();      \
-    dyn->vector_sew = VECTOR_SEWNA;
+    dyn->rvv.bits = 0;
 
-#define ARCH_RESET() \
-    dyn->vector_sew = VECTOR_SEWNA;
+#define ARCH_RESET() dyn->rvv.bits = 0;
+
+#undef PREFLAGSNEEDED
+#define PREFLAGSNEEDED()                                                    \
+    if (dyn->always_test && ninst && dyn->insts[ninst - 1].x64.has_callret) \
+        checkCRC(dyn, ninst);
 
 #if STEP < 2
 #define GETIP(A, scratch)
 #define GETIP_(A, scratch)
+#define GETRETADDR(A, reg, scratch)
 #else
 #define GETIP_(A, scratch)                                        \
     do {                                                          \
@@ -1373,6 +1644,21 @@
     GETIP_(A, scratch);   \
     dyn->last_ip = (A);
 
+#define GETRETADDR(A, reg, scratch)                                   \
+    do {                                                              \
+        ssize_t _delta_ra = (ssize_t)(A) - (ssize_t)dyn->last_ip;     \
+        if (dyn->last_ip && _delta_ra >= -2048 && _delta_ra < 2048) { \
+            if (_delta_ra)                                            \
+                ADDI(reg, xRIP, _delta_ra);                           \
+            else                                                      \
+                MV(reg, xRIP);                                        \
+        } else if (dyn->need_reloc) {                                 \
+            TABLE64(reg, (A));                                        \
+        } else {                                                      \
+            MOV64x(reg, (A));                                         \
+        }                                                             \
+    } while (0)
+
 #endif
 #define CLEARIP() dyn->last_ip = 0
 
@@ -1388,25 +1674,47 @@
 
 #define MODREG ((nextop & 0xC0) == 0xC0)
 
-#ifndef SET_ELEMENT_WIDTH
-#define SET_ELEMENT_WIDTH(s1, sew, set)                                               \
-    do {                                                                              \
-        if ((sew) == VECTOR_SEWANY && dyn->vector_sew != VECTOR_SEWNA) {              \
-            dyn->vector_eew = dyn->vector_sew;                                        \
-        } else if ((sew) == dyn->vector_sew) {                                        \
-            dyn->vector_eew = dyn->vector_sew;                                        \
-        } else {                                                                      \
-            dyn->vector_eew = vector_vsetvli(dyn, ninst, s1, (sew), VECTOR_LMUL1, 1); \
-        }                                                                             \
-        if (set) dyn->vector_sew = dyn->vector_eew;                                   \
+#define SET_ELEMENT_WIDTH(s1, sew)                                              \
+    do {                                                                        \
+        dyn->vector_eew = rvv_set_vl_for_width(dyn, ninst, s1, sew, VECTOR_LMUL1, 16); \
     } while (0)
-#endif
 
-#define SET_CACHE_VECTOR_WIDTH(S1)                                                \
-    do {                                                                          \
-        int sew = dyn->vector_sew;                                                \
-        if (sew == VECTOR_SEWNA || sew == VECTOR_SEWANY) sew = VECTOR_SEW8;       \
-        dyn->vector_eew = vector_vsetvli(dyn, ninst, (S1), sew, VECTOR_LMUL1, 1); \
+#define SET_SCALAR_FP_WIDTH(s1, sew)                                            \
+    do {                                                                        \
+        dyn->vector_eew = rvv_set_config(dyn, ninst, s1, sew, VECTOR_LMUL1, 1); \
+    } while (0)
+
+#define AVX_SCALAR_OP_PROLOG_D(SEW, D)                                                             \
+    do {                                                                                           \
+        gd = ((nextop >> 3) & 7) + (rex.r << 3);                                                   \
+        q0 = simd_get(dyn, ninst, x1, vex.v, 1 << (SEW), (SEW), 0);                                \
+        if (MODREG) {                                                                              \
+            ed = (nextop & 7) + (rex.b << 3);                                                      \
+            q1 = simd_get(dyn, ninst, x1, ed, 1 << (SEW), (SEW), 0);                               \
+            if (gd == ed && gd != vex.v) {                                                         \
+                int temp = vpu_get_scratch(dyn);                                                   \
+                VMV_V_V(temp, q1);                                                                 \
+                q1 = temp;                                                                         \
+            }                                                                                      \
+        } else {                                                                                   \
+            q1 = vpu_get_scratch(dyn);                                                             \
+            SMREAD();                                                                              \
+            addr = geted(dyn, addr, ninst, nextop, &ed, x2, x3, &fixedaddress, rex, NULL, 0, (D)); \
+            rvv_set_config(dyn, ninst, x1, (SEW), VECTOR_LMUL1, 1);                                \
+            VLE_V(q1, ed, (SEW), VECTOR_UNMASKED, VECTOR_NFIELD1);                                 \
+        }                                                                                          \
+        v0 = simd_seed_scalar(dyn, ninst, x1, gd, vex.v, (SEW));                                   \
+    } while (0)
+
+#define AVX_SCALAR_OP_PROLOG(SEW) AVX_SCALAR_OP_PROLOG_D(SEW, 0)
+#define AVX_SCALAR_OP_STORE(SEW)  simd_commit(dyn, ninst, gd, (SEW) == VECTOR_SEW32 ? SIMD_LO32 : SIMD_LO64, SIMD_HI128)
+
+#define AVX_SCALAR_CMP(SEW)                       \
+    do {                                          \
+        AVX_SCALAR_OP_PROLOG_D(SEW, 1);           \
+        u8 = F8;                                  \
+        simd_compare(dyn, ninst, v0, q0, q1, u8); \
+        AVX_SCALAR_OP_STORE(SEW);                 \
     } while (0)
 
 #ifndef STEPNAME
@@ -1423,6 +1731,10 @@
 #define dynarec64_00_2   STEPNAME(dynarec64_00_2)
 #define dynarec64_00_3   STEPNAME(dynarec64_00_3)
 #define dynarec64_0F     STEPNAME(dynarec64_0F)
+#define dynarec64_0F_0   STEPNAME(dynarec64_0F_0)
+#define dynarec64_0F_1   STEPNAME(dynarec64_0F_1)
+#define dynarec64_0F_2   STEPNAME(dynarec64_0F_2)
+#define dynarec64_0F_3   STEPNAME(dynarec64_0F_3)
 #define dynarec64_65     STEPNAME(dynarec64_65)
 #define dynarec64_66     STEPNAME(dynarec64_66)
 #define dynarec64_D8     STEPNAME(dynarec64_D8)
@@ -1471,6 +1783,7 @@
 #define jump_to_epilog_fast STEPNAME(jump_to_epilog_fast)
 #define jump_to_next        STEPNAME(jump_to_next)
 #define ret_to_next         STEPNAME(ret_to_next)
+#define checkCRC            STEPNAME(checkCRC)
 #define doEnterBlock        STEPNAME(doEnterBlock)
 #define doLeaveBlock        STEPNAME(doLeaveBlock)
 #define iret_to_next        STEPNAME(iret_to_next)
@@ -1611,47 +1924,87 @@
 #define x87_swapreg                  STEPNAME(x87_swapreg)
 #define x87_setround                 STEPNAME(x87_setround)
 #define x87_restoreround             STEPNAME(x87_restoreround)
-#define sse_setround                 STEPNAME(sse_setround)
+#define simd_sync_rounding           STEPNAME(simd_sync_rounding)
 #define mmx_get_reg                  STEPNAME(mmx_get_reg)
 #define mmx_get_reg_empty            STEPNAME(mmx_get_reg_empty)
 #define mmx_forget_reg               STEPNAME(mmx_forget_reg)
+#define fpu_borrow_reg               STEPNAME(fpu_borrow_reg)
+#define fpu_borrow_regs              STEPNAME(fpu_borrow_regs)
 #define mmx_flush_reg_preserve_vtype STEPNAME(mmx_flush_reg_preserve_vtype)
-#define sse_get_reg                  STEPNAME(sse_get_reg)
-#define sse_get_reg_empty            STEPNAME(sse_get_reg_empty)
-#define sse_get_reg_size_changed     STEPNAME(sse_get_reg_size_changed)
-#define sse_forget_reg               STEPNAME(sse_forget_reg)
-#define sse_purge07cache             STEPNAME(sse_purge07cache)
-#define sse_reflect_reg              STEPNAME(sse_reflect_reg)
+#define simd_get_fp_reg              STEPNAME(simd_get_fp_reg)
+#define simd_get_fp_reg_empty        STEPNAME(simd_get_fp_reg_empty)
+#define simd_get_fp_reg_resized      STEPNAME(simd_get_fp_reg_resized)
+#define simd_forget_fp_reg           STEPNAME(simd_forget_fp_reg)
+#define simd_purge_low               STEPNAME(simd_purge_low)
+#define simd_reflect_fp_reg          STEPNAME(simd_reflect_fp_reg)
 
 #define mmx_get_reg_vector       STEPNAME(mmx_get_reg_vector)
 #define mmx_get_reg_empty_vector STEPNAME(mmx_get_reg_empty_vector)
-#define sse_get_reg_empty_vector STEPNAME(sse_get_reg_empty_vector)
-#define sse_get_reg_vector       STEPNAME(sse_get_reg_vector)
-#define sse_forget_reg_vector    STEPNAME(sse_forget_reg_vector)
-#define avx_set_vector_width     STEPNAME(avx_set_vector_width)
-#define avx_load_reg_vector      STEPNAME(avx_load_reg_vector)
-#define avx_store_reg_vector     STEPNAME(avx_store_reg_vector)
+#define simd_get_reg_empty       STEPNAME(simd_get_reg_empty)
+#define simd_get                 STEPNAME(simd_get)
+#define simd_access              STEPNAME(simd_access)
+#define simd_snapshot            STEPNAME(simd_snapshot)
+#define simd_prepare_entry       STEPNAME(simd_prepare_entry)
+#define rvv_prepare_branch       STEPNAME(rvv_prepare_branch)
+#define simd_materialize         STEPNAME(simd_materialize)
+#define simd_flush               STEPNAME(simd_flush)
+#define simd_transform           STEPNAME(simd_transform)
+#define simd_purge               STEPNAME(simd_purge)
+#define simd_reflect             STEPNAME(simd_reflect)
+void simd_snapshot(dynarec_rv64_t* dyn, int a);
+void simd_prepare_entry(dynarec_rv64_t* dyn, int ninst, int emit);
+void rvv_prepare_branch(dynarec_rv64_t* dyn, int ninst, int condition_reg);
+void simd_materialize(dynarec_rv64_t* dyn, int ninst, int s1, int a, unsigned regions);
+void simd_flush(dynarec_rv64_t* dyn, int ninst, int s1, int a, unsigned regions, int clean);
+void simd_transform(dynarec_rv64_t* dyn, int ninst, int s1, const extcache_t* target);
+void simd_purge(dynarec_rv64_t* dyn, int ninst, int next, int s1, int s2);
+void simd_reflect(dynarec_rv64_t* dyn, int ninst, int s1, int s2);
+
+#define simd_write        STEPNAME(simd_write)
+#define simd_copy         STEPNAME(simd_copy)
+#define simd_seed_scalar  STEPNAME(simd_seed_scalar)
+#define simd_scalar_arith STEPNAME(simd_scalar_arith)
+#define simd_compare      STEPNAME(simd_compare)
+#define simd_pcmpistri_negative_equal_each STEPNAME(simd_pcmpistri_negative_equal_each)
+#define simd_pcmpistrm_equal_each STEPNAME(simd_pcmpistrm_equal_each)
+int simd_write(dynarec_rv64_t* dyn, int ninst, int s1, int a, unsigned bytes, int sew);
+void simd_copy(dynarec_rv64_t* dyn, int ninst, int s1, int dst, int src, unsigned bytes, int vex);
+int simd_seed_scalar(dynarec_rv64_t* dyn, int ninst, int s1, int dst, int src, int sew);
+void simd_compare(dynarec_rv64_t* dyn, int ninst, int dst, int left, int right, unsigned predicate);
+void simd_pcmpistri_negative_equal_each(dynarec_rv64_t* dyn, int ninst, int left, int right, unsigned lanes);
+void simd_pcmpistrm_equal_each(dynarec_rv64_t* dyn, int ninst, int dst, int left, int right, unsigned control);
+void simd_scalar_arith(dynarec_rv64_t* dyn, int ninst, int s1, int dst, int left, int right, int sew, int opcode);
+#define simd_commit      STEPNAME(simd_commit)
+#define simd_get_reg     STEPNAME(simd_get_reg)
+#define simd_forget_reg  STEPNAME(simd_forget_reg)
+#define simd_set_width   STEPNAME(simd_set_width)
+#define simd_load_reg    STEPNAME(simd_load_reg)
+#define simd_store_reg   STEPNAME(simd_store_reg)
+#define simd_flush_upper STEPNAME(simd_flush_upper)
+void simd_flush_upper(dynarec_rv64_t* dyn, int ninst, int s1, int a);
+#define simd_sync_upper STEPNAME(simd_sync_upper)
 
 #define fpu_pushcache       STEPNAME(fpu_pushcache)
 #define fpu_popcache        STEPNAME(fpu_popcache)
 #define fpu_reset_cache     STEPNAME(fpu_reset_cache)
 #define fpu_propagate_stack STEPNAME(fpu_propagate_stack)
 #define fpu_purgecache      STEPNAME(fpu_purgecache)
+#define fpu_exitcache       STEPNAME(fpu_exitcache)
 #define fpu_needpurgecache  STEPNAME(fpu_needpurgecache)
 #define mmx_purgecache      STEPNAME(mmx_purgecache)
 #define x87_purgecache      STEPNAME(x87_purgecache)
-#define sse_purgecache      STEPNAME(sse_purgecache)
 #define fpu_reflectcache    STEPNAME(fpu_reflectcache)
 #define fpu_unreflectcache  STEPNAME(fpu_unreflectcache)
 #define x87_reflectcount    STEPNAME(x87_reflectcount)
 #define x87_unreflectcount  STEPNAME(x87_unreflectcount)
 
-#define CacheTransform STEPNAME(CacheTransform)
+#define simd_cache_transform STEPNAME(simd_cache_transform)
 #define rv64_move64    STEPNAME(rv64_move64)
 #define rv64_move32    STEPNAME(rv64_move32)
 
-#define vector_vsetvli  STEPNAME(vector_vsetvli)
-#define vector_loadmask STEPNAME(vector_loadmask)
+#define rvv_set_config STEPNAME(rvv_set_config)
+#define rvv_set_vl_for_width  STEPNAME(rvv_set_vl_for_width)
+#define rvv_mask       STEPNAME(rvv_mask)
 
 /* setup r2 to address pointed by */
 uintptr_t geted(dynarec_rv64_t* dyn, uintptr_t addr, int ninst, uint8_t nextop, uint8_t* ed, uint8_t hint, uint8_t scratch, int64_t* fixaddress, rex_t rex, int* l, int i12, int delta);
@@ -1664,6 +2017,7 @@ void doEnterBlock(dynarec_rv64_t* dyn, int ninst, int s1, int s2, int s3);
 void doLeaveBlock(dynarec_rv64_t* dyn, int ninst, int s1, int s2, int s3);
 void jump_to_next(dynarec_rv64_t* dyn, uintptr_t ip, int reg, int ninst, int is32bits);
 void ret_to_next(dynarec_rv64_t* dyn, uintptr_t ip, int ninst, rex_t rex);
+void checkCRC(dynarec_rv64_t* dyn, int ninst);
 void iret_to_next(dynarec_rv64_t* dyn, uintptr_t ip, int ninst, int is32bits, int is64bits);
 void call_c(dynarec_rv64_t* dyn, int ninst, rv64_consts_t fnc, int reg, int ret, int saveflags, int savereg, int arg1, int arg2, int arg3, int arg4, int arg5, int arg6);
 void call_n(dynarec_rv64_t* dyn, int ninst, void* fnc, int w);
@@ -1818,16 +2172,17 @@ void x87_swapreg(dynarec_rv64_t* dyn, int ninst, int s1, int s2, int a, int b);
 int x87_setround(dynarec_rv64_t* dyn, int ninst, int s1, int s2);
 // Restore round flag
 void x87_restoreround(dynarec_rv64_t* dyn, int ninst, int s1);
+void simd_sync_rounding(dynarec_rv64_t* dyn, int ninst, int s1, int s2);
 // Set rounding according to mxcsr flags, return reg to restore flags
-int sse_setround(dynarec_rv64_t* dyn, int ninst, int s1, int s2);
 
-void CacheTransform(dynarec_rv64_t* dyn, int ninst, int cacheupd, int s1, int s2, int s3);
+void simd_cache_transform(dynarec_rv64_t* dyn, int ninst, int cacheupd, int s1, int s2, int s3);
 
-void rv64_move64(dynarec_rv64_t* dyn, int ninst, int reg, int64_t val);
-void rv64_move32(dynarec_rv64_t* dyn, int ninst, int reg, int32_t val, int zeroup);
+void rv64_move64(dynarec_rv64_t* dyn, int ninst, int reg, int64_t val, int s1, int s2);
+void rv64_move32(dynarec_rv64_t* dyn, int ninst, int reg, int32_t val);
 
-int vector_vsetvli(dynarec_rv64_t* dyn, int ninst, int s1, int sew, int vlmul, float multiple);
-void vector_loadmask(dynarec_rv64_t* dyn, int ninst, int vreg, uint64_t imm, int s1, float multiple);
+int rvv_set_config(dynarec_rv64_t* dyn, int ninst, int s1, int sew, int lmul, unsigned vl);
+int rvv_set_vl_for_width(dynarec_rv64_t* dyn, int ninst, int s1, int sew, int vlmul, unsigned bytes);
+void rvv_mask(dynarec_rv64_t* dyn, int ninst, int vreg, uint64_t imm, int s1);
 
 #if STEP < 2
 #define CHECK_CACHE() 0
@@ -1872,32 +2227,46 @@ int mmx_get_reg_empty(dynarec_rv64_t* dyn, int ninst, int s1, int s2, int s3, in
 int mmx_get_reg_empty_vector(dynarec_rv64_t* dyn, int ninst, int s1, int s2, int s3, int a);
 // forget float register for a MMX reg, create the entry if needed
 void mmx_forget_reg(dynarec_rv64_t* dyn, int ninst, int s1, int a);
+int fpu_borrow_reg(dynarec_rv64_t* dyn, int ninst, int s1, int s2, int reg);
+void fpu_borrow_regs(dynarec_rv64_t* dyn, int ninst, int s1, int s2, int* regs, int count, int first);
 void mmx_flush_reg_preserve_vtype(dynarec_rv64_t* dyn, int ninst, int s1, int a);
 
 // SSE/SSE2 helpers
 //  get float register for a SSE reg, create the entry if needed
-int sse_get_reg(dynarec_rv64_t* dyn, int ninst, int s1, int a, int single);
-// get rvv register for a SSE reg, create the entry if needed
-int sse_get_reg_vector(dynarec_rv64_t* dyn, int ninst, int s1, int a, int forwrite, int sew);
+int simd_get_fp_reg(dynarec_rv64_t* dyn, int ninst, int s1, int a, int single);
+int simd_access(dynarec_rv64_t* dyn, int ninst, int s1, int a, unsigned regions, int write);
+int simd_get(dynarec_rv64_t* dyn, int ninst, int s1, int a, unsigned bytes, int sew, int write);
+void simd_commit(dynarec_rv64_t* dyn, int ninst, int a, unsigned written, unsigned zero);
+int simd_get_reg(dynarec_rv64_t* dyn, int ninst, int s1, int a, int forwrite, int sew);
 // get float register for a SSE reg, but don't try to synch it if it needed to be created
-int sse_get_reg_empty(dynarec_rv64_t* dyn, int ninst, int s1, int a, int single);
+int simd_get_fp_reg_empty(dynarec_rv64_t* dyn, int ninst, int s1, int a, int single);
 // get an ext register for an SSE reg which changes size, with single or not AFTER the change
-int sse_get_reg_size_changed(dynarec_rv64_t* dyn, int ninst, int s1, int a, int single);
-// get rvv register for an SSE reg, but don't try to synch it if it needed to be created
-int sse_get_reg_empty_vector(dynarec_rv64_t* dyn, int ninst, int s1, int a);
+int simd_get_fp_reg_resized(dynarec_rv64_t* dyn, int ninst, int s1, int a, int single);
+int simd_get_reg_empty(dynarec_rv64_t* dyn, int ninst, int s1, int a);
 // forget float register for a SSE reg, create the entry if needed
-void sse_forget_reg(dynarec_rv64_t* dyn, int ninst, int s1, int a);
-// forget rvv register for a SSE reg, does nothing if the regs is not loaded
-void sse_forget_reg_vector(dynarec_rv64_t* dyn, int ninst, int s1, int a);
-// purge the XMM0..XMM7 cache (before function call)
-void sse_purge07cache(dynarec_rv64_t* dyn, int ninst, int s1);
-// Push current value to the cache
-void sse_reflect_reg(dynarec_rv64_t* dyn, int ninst, int s1, int a);
+void simd_forget_fp_reg(dynarec_rv64_t* dyn, int ninst, int s1, int a);
+void simd_forget_reg(dynarec_rv64_t* dyn, int ninst, int s1, int a);
+void simd_purge_low(dynarec_rv64_t* dyn, int ninst, int s1);
+void simd_reflect_fp_reg(dynarec_rv64_t* dyn, int ninst, int s1, int a);
 
-// Cache-neutral helpers for Box64's split XMM/YMM register storage.
-void avx_set_vector_width(dynarec_rv64_t* dyn, int ninst, int s1, int sew, int width);
-void avx_load_reg_vector(dynarec_rv64_t* dyn, int ninst, int s1, int vreg, int a, int width, int sew);
-void avx_store_reg_vector(dynarec_rv64_t* dyn, int ninst, int s1, int vreg, int a, int width, int sew);
+void simd_sync_upper(dynarec_rv64_t* dyn, int ninst, int s1, int next);
+void simd_set_width(dynarec_rv64_t* dyn, int ninst, int s1, int sew, int width);
+void simd_load_reg(dynarec_rv64_t* dyn, int ninst, int s1, int vreg, int a, int width, int sew);
+void simd_store_reg(dynarec_rv64_t* dyn, int ninst, int s1, int vreg, int a, int width, int sew);
+
+#define emit_mxcsr_raise_invalid(s1)             \
+    do {                                         \
+        LW(s1, xEmu, offsetof(x64emu_t, mxcsr)); \
+        ORI(s1, s1, 1);                          \
+        SW(s1, xEmu, offsetof(x64emu_t, mxcsr)); \
+    } while (0)
+
+#define emit_mxcsr_raise_precision(s1)           \
+    do {                                         \
+        LW(s1, xEmu, offsetof(x64emu_t, mxcsr)); \
+        ORI(s1, s1, 0x20);                       \
+        SW(s1, xEmu, offsetof(x64emu_t, mxcsr)); \
+    } while (0)
 
 // common coproc helpers
 // reset the cache with n
@@ -1906,6 +2275,7 @@ void fpu_reset_cache(dynarec_rv64_t* dyn, int ninst, int reset_n);
 void fpu_propagate_stack(dynarec_rv64_t* dyn, int ninst);
 // purge the FPU cache (needs 3 scratch registers)
 void fpu_purgecache(dynarec_rv64_t* dyn, int ninst, int next, int s1, int s2, int s3);
+void fpu_exitcache(dynarec_rv64_t* dyn, int ninst, int s1, int s2, int s3);
 // check if the fpu cache need to be purged
 int fpu_needpurgecache(dynarec_rv64_t* dyn, int ninst);
 // purge MMX cache
@@ -1926,6 +2296,10 @@ uintptr_t dynarec64_00_1(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
 uintptr_t dynarec64_00_2(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int ninst, rex_t rex, int* ok, int* need_epilog);
 uintptr_t dynarec64_00_3(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int ninst, rex_t rex, int* ok, int* need_epilog);
 uintptr_t dynarec64_0F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int ninst, rex_t rex, int* ok, int* need_epilog);
+uintptr_t dynarec64_0F_0(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int ninst, rex_t rex, int* ok, int* need_epilog);
+uintptr_t dynarec64_0F_1(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int ninst, rex_t rex, int* ok, int* need_epilog);
+uintptr_t dynarec64_0F_2(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int ninst, rex_t rex, int* ok, int* need_epilog);
+uintptr_t dynarec64_0F_3(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int ninst, rex_t rex, int* ok, int* need_epilog);
 uintptr_t dynarec64_66(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int ninst, rex_t rex, int* ok, int* need_epilog);
 uintptr_t dynarec64_D8(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int ninst, rex_t rex, int* ok, int* need_epilog);
 uintptr_t dynarec64_D9(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int ninst, rex_t rex, int* ok, int* need_epilog);
@@ -2122,11 +2496,10 @@ uintptr_t dynarec64_AVX_F3_0F_vector(dynarec_rv64_t* dyn, uintptr_t addr, uintpt
     SLLI(s1, s2, 8);                                           \
     J(20); /* end */                                           \
     /* undefined/NaN */                                        \
-    LUI(s1, 4);                                                \
-    ADDI(s1, s1, 0b010100000000);                              \
+    MOV32w(s1, 0x4500);                                        \
     J(8); /* end */                                            \
     /* equal */                                                \
-    LUI(s1, 4);                                                \
+    MOV32w(s1, 0x4000);                                        \
     /* end */                                                  \
     OR(s3, s3, s1);                                            \
     SH(s3, xEmu, offsetof(x64emu_t, sw));
@@ -2268,8 +2641,19 @@ uintptr_t dynarec64_AVX_F3_0F_vector(dynarec_rv64_t* dyn, uintptr_t addr, uintpt
         }                                               \
     } while (0)
 
-#define VECTOR_LOAD_VMASK(mask, s1, multiple) \
-    vector_loadmask(dyn, ninst, VMASK, mask, s1, multiple)
+#define VECTOR_SPLAT_IMM_S(vreg, imm, s1, s2)           \
+    do {                                                \
+        if (imm == 0) {                                 \
+            VXOR_VV(vreg, vreg, vreg, VECTOR_UNMASKED); \
+        } else if ((imm & 0xf) == imm) {                \
+            VMV_V_I(vreg, imm);                         \
+        } else {                                        \
+            MOV64xs(s1, imm, s2);                       \
+            VMV_V_X(vreg, s1);                          \
+        }                                               \
+    } while (0)
+
+#define VECTOR_LOAD_VMASK(mask, s1) rvv_mask(dyn, ninst, VMASK, mask, s1)
 
 #ifndef SCRATCH_USAGE
 #define SCRATCH_USAGE(usage)
@@ -2278,8 +2662,8 @@ uintptr_t dynarec64_AVX_F3_0F_vector(dynarec_rv64_t* dyn, uintptr_t addr, uintpt
 // TODO: can be lazy
 #define YMM0(a)                                        \
     do {                                               \
-        SD(xZR, xEmu, offsetof(x64emu_t, ymm[a]) + 0); \
-        SD(xZR, xEmu, offsetof(x64emu_t, ymm[a]) + 8); \
+        SD(xZR, xEmu, YMMOFF(a) + 0); \
+        SD(xZR, xEmu, YMMOFF(a) + 8); \
     } while (0)
 
 

@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,11 +48,7 @@
 #include "../tools/bridge_private.h"
 #include "x64tls.h"
 
-#ifndef STATICBUILD
-void startMallocHook();
-#else
-void startMallocHook() {}
-#endif
+#include "guestalloc.h"
 
 void* my__IO_2_1_stderr_ = (void*)1;
 void* my__IO_2_1_stdin_  = (void*)2;
@@ -433,7 +428,7 @@ int AllocLoadElfMemory(box64context_t* context, elfheader_t* head, int mainbin)
                 setProtection_elf((uintptr_t)p, asize, prot);
                 head->multiblocks[n].p = p;
                 if (file_read_size) {
-                    fseeko64(head->file, head->multiblocks[n].offs, SEEK_SET);
+                    fseeko(head->file, head->multiblocks[n].offs, SEEK_SET);
                     if(fread((void*)head->multiblocks[n].paddr, file_read_size, 1, head->file)!=1) {
                         printf_log(LOG_NONE, "Cannot read elf block (@%p 0x%zx/0x%zx) for elf \"%s\"\n", (void*)head->multiblocks[n].offs, head->multiblocks[n].asize, (box64_pagesize - 1), head->name);
                         return 1;
@@ -458,7 +453,7 @@ int AllocLoadElfMemory(box64context_t* context, elfheader_t* head, int mainbin)
             char* dest = (char*)(context->tlsdata+context->tlssize+head->tlsbase);
             printf_log(LOG_DEBUG, "Loading TLS block #%zu @%p (0x%zx/0x%zx)\n", i, dest, e->p_filesz, e->p_memsz);
             if(e->p_filesz) {
-                fseeko64(head->file, e->p_offset, SEEK_SET);
+                fseeko(head->file, e->p_offset, SEEK_SET);
                 if(fread(dest, e->p_filesz, 1, head->file)!=1) {
                     mutex_unlock(&context->mutex_tls);
                     printf_log(LOG_NONE, "Fail to read PT_TLS part #%zu (size=%zd)\n", i, e->p_filesz);
@@ -1138,6 +1133,81 @@ $PLATFORM – Expands to the processor type of the current machine (see the
 uname(1) man page description of the -i option). For more details of this token
 expansion, see “System Specific Shared Objects”
 */
+char* ExpandNeededLibs(elfheader_t* h, char* rpath)
+{
+    if(!rpath || !h) return rpath;
+    char* rpathref = rpath;
+    while(strstr(rpath, "$$ORIGIN")) {
+        char* origin = box_strdup(h->path);
+        char* p = strrchr(origin, '/');
+        if(p) *p = '\0';    // remove file name to have only full path, without last '/'
+        char* tmp = (char*)box_calloc(1, strlen(rpath)-strlen("$$ORIGIN")+strlen(origin)+1);
+        p = strstr(rpath, "$$ORIGIN");
+        memcpy(tmp, rpath, p-rpath);
+        strcat(tmp, origin);
+        strcat(tmp, p+strlen("$$ORIGIN"));
+        if(rpath!=rpathref)
+            box_free(rpath);
+        rpath = tmp;
+        box_free(origin);
+    }
+    while(strstr(rpath, "$ORIGIN")) {
+        char* origin = box_strdup(h->path);
+        char* p = strrchr(origin, '/');
+        if(p) *p = '\0';    // remove file name to have only full path, without last '/'
+        char* tmp = (char*)box_calloc(1, strlen(rpath)-strlen("$ORIGIN")+strlen(origin)+1);
+        p = strstr(rpath, "$ORIGIN");
+        memcpy(tmp, rpath, p-rpath);
+        strcat(tmp, origin);
+        strcat(tmp, p+strlen("$ORIGIN"));
+        if(rpath!=rpathref)
+            box_free(rpath);
+        rpath = tmp;
+        box_free(origin);
+    }
+    while(strstr(rpath, "${ORIGIN}")) {
+        char* origin = box_strdup(h->path);
+        char* p = strrchr(origin, '/');
+        if(p) *p = '\0';    // remove file name to have only full path, without last '/'
+        char* tmp = (char*)box_calloc(1, strlen(rpath)-strlen("${ORIGIN}")+strlen(origin)+1);
+        p = strstr(rpath, "${ORIGIN}");
+        memcpy(tmp, rpath, p-rpath);
+        strcat(tmp, origin);
+        strcat(tmp, p+strlen("${ORIGIN}"));
+        if(rpath!=rpathref)
+            box_free(rpath);
+        rpath = tmp;
+        box_free(origin);
+        if(!FileExist(rpath, 0) && strstr(rpath, "/../../")) {
+            tmp = (char*)box_calloc(1, strlen(rpath)+1);
+            strcpy(tmp, rpath);
+            // check if one "/.." could be removed for the folder to exist
+            char* p = strstr(tmp, "/../../");
+            memmove(p, p+3, strlen(p+3)+1);
+            if(FileExist(tmp, 0)) {
+                if(rpath!=rpathref)
+                    box_free(rpath);
+                rpath = tmp;
+            } else
+                box_free(tmp);
+        }
+    }
+    while(strstr(rpath, "${PLATFORM}")) {
+        char* platform = box_strdup("x86_64");
+        char* p = strrchr(platform, '/');
+        if(p) *p = '\0';    // remove file name to have only full path, without last '/'
+        char* tmp = (char*)box_calloc(1, strlen(rpath)-strlen("${PLATFORM}")+strlen(platform)+1);
+        p = strstr(rpath, "${PLATFORM}");
+        memcpy(tmp, rpath, p-rpath);
+        strcat(tmp, platform);
+        strcat(tmp, p+strlen("${PLATFORM}"));
+        if(rpath!=rpathref)
+            box_free(rpath);
+        rpath = tmp;
+        box_free(platform);
+    }
+    return rpath;
+}
 int LoadNeededLibs(elfheader_t* h, lib_t *maplib, int local, int bindnow, int deepbind, box64context_t *box64, x64emu_t* emu)
 {
     if(h->needed)   // already done
@@ -1150,75 +1220,7 @@ int LoadNeededLibs(elfheader_t* h, lib_t *maplib, int local, int bindnow, int de
         if(tag==DT_RPATH || tag==DT_RUNPATH) {
             char *rpathref = h->DynStrTab+h->delta+(box64_is32bits?h->Dynamic._32[i].d_un.d_val:h->Dynamic._64[i].d_un.d_val);
             char* rpath = rpathref;
-            while(strstr(rpath, "$$ORIGIN")) {
-                char* origin = box_strdup(h->path);
-                char* p = strrchr(origin, '/');
-                if(p) *p = '\0';    // remove file name to have only full path, without last '/'
-                char* tmp = (char*)box_calloc(1, strlen(rpath)-strlen("$$ORIGIN")+strlen(origin)+1);
-                p = strstr(rpath, "$$ORIGIN");
-                memcpy(tmp, rpath, p-rpath);
-                strcat(tmp, origin);
-                strcat(tmp, p+strlen("$$ORIGIN"));
-                if(rpath!=rpathref)
-                    box_free(rpath);
-                rpath = tmp;
-                box_free(origin);
-            }
-            while(strstr(rpath, "$ORIGIN")) {
-                char* origin = box_strdup(h->path);
-                char* p = strrchr(origin, '/');
-                if(p) *p = '\0';    // remove file name to have only full path, without last '/'
-                char* tmp = (char*)box_calloc(1, strlen(rpath)-strlen("$ORIGIN")+strlen(origin)+1);
-                p = strstr(rpath, "$ORIGIN");
-                memcpy(tmp, rpath, p-rpath);
-                strcat(tmp, origin);
-                strcat(tmp, p+strlen("$ORIGIN"));
-                if(rpath!=rpathref)
-                    box_free(rpath);
-                rpath = tmp;
-                box_free(origin);
-            }
-            while(strstr(rpath, "${ORIGIN}")) {
-                char* origin = box_strdup(h->path);
-                char* p = strrchr(origin, '/');
-                if(p) *p = '\0';    // remove file name to have only full path, without last '/'
-                char* tmp = (char*)box_calloc(1, strlen(rpath)-strlen("${ORIGIN}")+strlen(origin)+1);
-                p = strstr(rpath, "${ORIGIN}");
-                memcpy(tmp, rpath, p-rpath);
-                strcat(tmp, origin);
-                strcat(tmp, p+strlen("${ORIGIN}"));
-                if(rpath!=rpathref)
-                    box_free(rpath);
-                rpath = tmp;
-                box_free(origin);
-                if(!FileExist(rpath, 0) && strstr(rpath, "/../../")) {
-                    tmp = (char*)box_calloc(1, strlen(rpath)+1);
-                    strcpy(tmp, rpath);
-                    // check if one "/.." could be removed for the folder to exist
-                    char* p = strstr(tmp, "/../../");
-                    memmove(p, p+3, strlen(p+3)+1);
-                    if(FileExist(tmp, 0)) {
-                        if(rpath!=rpathref)
-                            box_free(rpath);
-                        rpath = tmp;
-                    } else
-                        box_free(tmp);
-                }
-            }
-            while(strstr(rpath, "${PLATFORM}")) {
-                char* platform = box_strdup("x86_64");
-                char* p = strrchr(platform, '/');
-                if(p) *p = '\0';    // remove file name to have only full path, without last '/'
-                char* tmp = (char*)box_calloc(1, strlen(rpath)-strlen("${PLATFORM}")+strlen(platform)+1);
-                p = strstr(rpath, "${PLATFORM}");
-                memcpy(tmp, rpath, p-rpath);
-                strcat(tmp, platform);
-                strcat(tmp, p+strlen("${PLATFORM}"));
-                if(rpath!=rpathref)
-                    box_free(rpath);
-                rpath = tmp;
-                box_free(platform);
-            }
+            rpath = ExpandNeededLibs(h, rpath);
             if(strchr(rpath, '$')) {
                 printf_log(LOG_INFO, "Warning, RPATH with $ variable not supported yet (%s)\n", rpath);
             } else {
@@ -1255,8 +1257,13 @@ int LoadNeededLibs(elfheader_t* h, lib_t *maplib, int local, int bindnow, int de
         my_context->neededlibs = h->needed;
     int j=0;
     for (size_t i=0; i<h->numDynamic; ++i)
-        if((box64_is32bits?h->Dynamic._32[i].d_tag:h->Dynamic._64[i].d_tag)==DT_NEEDED)
-            h->needed->names[j++] = h->DynStrTab+h->delta+(box64_is32bits?h->Dynamic._32[i].d_un.d_val:h->Dynamic._64[i].d_un.d_val);
+        if((box64_is32bits?h->Dynamic._32[i].d_tag:h->Dynamic._64[i].d_tag)==DT_NEEDED) {
+            char* path = h->DynStrTab+h->delta+(box64_is32bits?h->Dynamic._32[i].d_un.d_val:h->Dynamic._64[i].d_un.d_val);
+            char* newpath = ExpandNeededLibs(h, path);
+            if(path!=newpath)
+                path = add1nsname(h->needed, newpath);
+            h->needed->names[j++] = path;
+        }
     #ifndef ANDROID
     if(box64_is32bits && strstr(h->name, "lsteamclient.dll.so"))
         h->needed->names[j++] = "libgcc_s.so.1";
@@ -1317,18 +1324,40 @@ void RefreshElfTLS(elfheader_t* h, x64emu_t* emu)
     }
 }
 
-void MallocHookRun(elfheader_t* h)
-{
-    if (!h)
-        return;
-    if(h->malloc_hook_2)
-        startMallocHook();
-}
-
 void MarkElfInitDone(elfheader_t* h)
 {
     if(h)
         h->init_done = 1;
+}
+
+void RunElfPreInit(elfheader_t* h, x64emu_t *emu)
+{
+    if(!h || h->preinit_done)
+        return;
+    h->preinit_done = 1;
+    if(!h->preinitarray || !h->preinitarray_sz)
+        return;
+    RefreshElfTLS(h, emu);
+    #ifdef BOX32
+    if(box64_is32bits) {
+        Elf32_Addr *addr = (Elf32_Addr*)(h->preinitarray + h->delta);
+        for (size_t i=0; i<h->preinitarray_sz; ++i) {
+            if(addr[i]) {
+                printf_dump(LOG_DEBUG, "Calling PreInit[%zu] for %s @%p\n", i, ElfName(h), from_ptrv(addr[i]));
+                RunFunctionWithEmu(emu, 0, (uintptr_t)addr[i], 3, my_context->argc, my_context->argv32, my_context->envv32);
+            }
+        }
+    } else
+    #endif
+    {
+        Elf64_Addr *addr = (Elf64_Addr*)(h->preinitarray + h->delta);
+        for (size_t i=0; i<h->preinitarray_sz; ++i) {
+            if(addr[i]) {
+                printf_dump(LOG_DEBUG, "Calling PreInit[%zu] for %s @%p\n", i, ElfName(h), (void*)addr[i]);
+                RunFunctionWithEmu(emu, 0, (uintptr_t)addr[i], 3, my_context->argc, my_context->argv, my_context->envv);
+            }
+        }
+    }
 }
 
 void RunElfInit(elfheader_t* h, x64emu_t *emu)
@@ -1388,9 +1417,6 @@ void RunElfInit(elfheader_t* h, x64emu_t *emu)
             }
         }
     }
-
-    if(h->malloc_hook_2)
-        startMallocHook();
 
     h->fini_done = 0;   // can be fini'd now (in case it was re-inited)
     printf_dump(LOG_DEBUG, "All Init Done for %s\n", ElfName(h));
@@ -1937,9 +1963,11 @@ void CreateMemorymapFile(box64context_t* context, int fd)
             elfheader_t* h = FindElfAddress(my_context, start);
             int l = strlen(line);
             if(h && l<73) {
+                line[strcspn(line, "\n")] = '\0';
                 sprintf(buff, "%s%*s\n", line, 74-l, h->name);
                 dummy = write(fd, buff, strlen(buff));
             } else if(start==(uintptr_t)my_context->stack) {
+                line[strcspn(line, "\n")] = '\0';
                 sprintf(buff, "%s%*s\n", line, 74-l, "[stack]");
                 dummy = write(fd, buff, strlen(buff));
             } else if (strstr(line, "[stack]")) {
@@ -2255,7 +2283,7 @@ const char* getAddrFunctionName(uintptr_t addr)
     const char* symbname = FindNearestSymbolName(elf, (void*)addr, &start, &sz);
     if (!sz) sz = 0x100; // arbitrary value...
     if (symbname && (addr >= start) && (addr < (start + sz))) {
-        if (symbname[0] == '\0')
+        if (elf && symbname[0] == '\0')
             sprintf(ret, "%s + 0x%lx + 0x%lx", ElfName(elf), start - (uintptr_t)GetBaseAddress(elf), addr - start);
         else if (addr == start)
             sprintf(ret, "%s/%s", ElfName(elf), symbname);

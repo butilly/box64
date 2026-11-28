@@ -67,7 +67,7 @@ int nativeFlagsNeedsTransform(dynarec_arm_t* dyn, int ninst);
 int fpuCacheNeedsTransform(dynarec_arm_t* dyn, int ninst);
 
 // Undo the changes of a neoncache to get the status before the instruction
-void neoncacheUnwind(neoncache_t* cache);
+void neoncacheUnwind(neoncache_t* cache, uint32_t preload);
 void fpu_save_and_unwind(dynarec_arm_t* dyn, int ninst, neoncache_t* cache);
 void fpu_unwind_restore(dynarec_arm_t* dyn, int ninst, neoncache_t* cache);
 
@@ -92,6 +92,9 @@ void updateYmm0s(dynarec_arm_t* dyn, int ninst, int max_ninst_reached);
 
 // add a preload of SSE/AVX register preload before i2, for a jump in ninst. Might not do it if there is jump in between that goes outside this ninst-i2 interval
 void addSSEPreload(dynarec_arm_t* dyn, int ninst, int i2, uint32_t preload);
+
+// mark a SSE reg as read by the current opcode, without touching its cache entry
+void sse_mark_used(dynarec_arm_t* dyn, int ninst, int a);
 
 // AVX helpers
 void avx_mark_zero(dynarec_arm_t* dyn, int ninst, int reg);

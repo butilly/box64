@@ -11,6 +11,7 @@
 #include <sys/wait.h>
 
 #include "box64context.h"
+#include "bridge.h"
 #include "debug.h"
 #include "core.h"
 #include "fileutils.h"
@@ -386,6 +387,11 @@ static void loadTest(const char** filepath, const char* include_path)
     struct json_value_s* mode = json_find(config->payload, "Mode");
     if (mode && mode->type == json_type_string && !strcmp(((struct json_string_s*)mode->payload)->string, "32BIT")) {
         box64_is32bits = true;
+#ifdef DYNAREC
+        my_context->exit_bridge = AddBridge(my_context->alternates, NULL, NULL, 0, NULL);
+#else
+        my_context->exit_bridge = AddBridge(NewBridge(), NULL, NULL, 0, NULL);
+#endif
         printf_log(LOG_INFO, "Test is in 32bits mode\n");
     }
 
@@ -613,6 +619,7 @@ static int runSingleTest(const char* filepath, const char* include_path)
 
     x64emu_t* emu = NewX64Emu(my_context, my_context->ep,
         (uintptr_t)my_context->stack, my_context->stacksz, 0);
+    thread_set_emu(emu);
 
     bool have_mmregs = false;
     for (int i = 0; i < 8; ++i) {
@@ -644,14 +651,14 @@ static int runSingleTest(const char* filepath, const char* include_path)
 
     for (int i = 0; i < 16; ++i) {
         if (check_xmmregs[i]) {
-            if (ymmregs[i][0] != emu->xmm[i].q[0] || ymmregs[i][1] != emu->xmm[i].q[1]) {
-                printf_log(LOG_NONE, "XMM%-2d: expected %016zx-%016zx, got %016zx-%016zx\n", i, ymmregs[i][1], ymmregs[i][0], emu->xmm[i].q[1], emu->xmm[i].q[0]);
+            if (ymmregs[i][0] != getXMM(emu, i)->q[0] || ymmregs[i][1] != getXMM(emu, i)->q[1]) {
+                printf_log(LOG_NONE, "XMM%-2d: expected %016zx-%016zx, got %016zx-%016zx\n", i, ymmregs[i][1], ymmregs[i][0], getXMM(emu, i)->q[1], getXMM(emu, i)->q[0]);
                 retcode += 1;
             }
         }
         if (check_ymmregs[i]) {
-            if (ymmregs[i][2] != emu->ymm[i].q[0] || ymmregs[i][3] != emu->ymm[i].q[1]) {
-                printf_log(LOG_NONE, "YMM%-2d: expected %016zx-%016zx, got %016zx-%016zx\n", i, ymmregs[i][3], ymmregs[i][2], emu->ymm[i].q[1], emu->ymm[i].q[0]);
+            if (ymmregs[i][2] != getYMM(emu, i)->q[0] || ymmregs[i][3] != getYMM(emu, i)->q[1]) {
+                printf_log(LOG_NONE, "YMM%-2d: expected %016zx-%016zx, got %016zx-%016zx\n", i, ymmregs[i][3], ymmregs[i][2], getYMM(emu, i)->q[1], getYMM(emu, i)->q[0]);
                 retcode += 1;
             }
         }

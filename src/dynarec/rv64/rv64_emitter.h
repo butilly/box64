@@ -11,8 +11,10 @@
 #define SPLIT12(A) ((A) & 0xfff)
 
 // MOV64x/MOV32w is quite complex, so use a function for this
-#define MOV64x(A, B) rv64_move64(dyn, ninst, A, B)
-#define MOV32w(A, B) rv64_move32(dyn, ninst, A, B, 1)
+#define MOV64x(A, B)           rv64_move64(dyn, ninst, A, B, -1, -1)
+#define MOV64xs(A, B, S1)      rv64_move64(dyn, ninst, A, B, S1, -1)
+#define MOV64xss(A, B, S1, S2) rv64_move64(dyn, ninst, A, B, S1, S2)
+#define MOV32w(A, B)           rv64_move32(dyn, ninst, A, (int32_t)(B))
 #define MOV64xw(A, B)     \
     do {                  \
         if (rex.w) {      \
@@ -114,20 +116,20 @@
 // rd = rs1 + rs2
 #define ADDxw(rd, rs1, rs2) EMIT(R_type(0b0000000, rs2, rs1, 0b000, rd, rex.w ? 0b0110011 : 0b0111011))
 // rd = rs1 + rs2
-#define ADDz(rd, rs1, rs2)      \
-    do {                        \
-        if (!rex.is32bits) {    \
-            ADD(rd, rs1, rs2);  \
-        } else {                \
-            ADDW(rd, rs1, rs2); \
-            ZEROUP(rd);         \
-        }                       \
+#define ADDz(rd, rs1, rs2)       \
+    do {                         \
+        if (!rex.is32bits) {     \
+            ADD(rd, rs1, rs2);   \
+        } else {                 \
+            ADDW(rd, rs1, rs2);  \
+            ZEROUP32_RESULT(rd); \
+        }                        \
     } while (0)
 #define ADDy(rd, rs1, rs2)              \
     do {                                \
         if (rex.is32bits || rex.is67) { \
             ADDW(rd, rs1, rs2);         \
-            ZEROUP(rd);                 \
+            ZEROUP32_RESULT(rd);        \
         } else {                        \
             ADD(rd, rs1, rs2);          \
         }                               \
@@ -148,14 +150,14 @@
 // rd = rs1 - rs2
 #define SUBxw(rd, rs1, rs2) EMIT(R_type(0b0100000, rs2, rs1, 0b000, rd, rex.w ? 0b0110011 : 0b0111011))
 // rd = rs1 - rs2
-#define SUBz(rd, rs1, rs2)     \
-    do {                       \
-        if (!rex.is32bits) {   \
-            SUB(rd, rs1, rs2); \
-        } else {               \
-            SUB(rd, rs1, rs2); \
-            ZEROUP(rd);        \
-        }                      \
+#define SUBz(rd, rs1, rs2)       \
+    do {                         \
+        if (!rex.is32bits) {     \
+            SUB(rd, rs1, rs2);   \
+        } else {                 \
+            SUB(rd, rs1, rs2);   \
+            ZEROUP32_RESULT(rd); \
+        }                        \
     } while (0)
 // rd = rs1<<rs2
 #define SLL(rd, rs1, rs2) EMIT(R_type(0b0000000, rs2, rs1, 0b001, rd, 0b0110011))
@@ -166,10 +168,10 @@
 // rd = rs1 ^ rs2
 #define XOR(rd, rs1, rs2) EMIT(R_type(0b0000000, rs2, rs1, 0b100, rd, 0b0110011))
 // rd = rs1 ^ rs2
-#define XORxw(rd, rs1, rs2)     \
-    do {                        \
-        XOR(rd, rs1, rs2);      \
-        if (!rex.w) ZEROUP(rd); \
+#define XORxw(rd, rs1, rs2)              \
+    do {                                 \
+        XOR(rd, rs1, rs2);               \
+        if (!rex.w) ZEROUP32_RESULT(rd); \
     } while (0)
 // rd = rs1>>rs2 logical
 #define SRL(rd, rs1, rs2) EMIT(R_type(0b0000000, rs2, rs1, 0b101, rd, 0b0110011))
@@ -519,6 +521,64 @@
         PUSH1(reg);     \
     }
 
+#define PUSH1mz(reg)                                                                \
+    do {                                                                            \
+        if ((reg) != xRSP)                                                          \
+            dyn->insts[ninst].rsp_class = RSP_CLASS_PUSH;                           \
+        if (dyn->insts[ninst].rsp_merge) {                                          \
+            int entry = dyn->insts[ninst].rsp_entry;                                \
+            int flush = dyn->insts[ninst].rsp_flush;                                \
+            int imm5 = flush / (rex.is32bits ? 4 : 8);                              \
+            if (flush && !entry) {                                                  \
+                if (rex.is32bits)                                                   \
+                    PUSH1_32(reg);                                                  \
+                else                                                                \
+                    PUSH1(reg);                                                     \
+            } else if (flush && cpuext.xtheadmemidx && imm5 >= -16 && imm5 <= 15) { \
+                if (rex.is32bits)                                                   \
+                    TH_SWIB(reg, xRSP, imm5, 2);                                    \
+                else                                                                \
+                    TH_SDIB(reg, xRSP, imm5, 3);                                    \
+            } else {                                                                \
+                if (rex.is32bits)                                                   \
+                    SW(reg, xRSP, entry - 4);                                       \
+                else                                                                \
+                    SD(reg, xRSP, entry - 8);                                       \
+                if (flush) ADDI(xRSP, xRSP, flush);                                 \
+            }                                                                       \
+        } else if (rex.is32bits) {                                                  \
+            PUSH1_32(reg);                                                          \
+        } else {                                                                    \
+            PUSH1(reg);                                                             \
+        }                                                                           \
+    } while (0)
+
+#define POP1mz(reg)                                      \
+    do {                                                 \
+        if ((reg) != xRSP)                               \
+            dyn->insts[ninst].rsp_class = RSP_CLASS_POP; \
+        if (dyn->insts[ninst].rsp_merge) {               \
+            int entry = dyn->insts[ninst].rsp_entry;     \
+            int flush = dyn->insts[ninst].rsp_flush;     \
+            if (flush && !entry) {                       \
+                if (rex.is32bits)                        \
+                    POP1_32(reg);                        \
+                else                                     \
+                    POP1(reg);                           \
+            } else {                                     \
+                if (rex.is32bits)                        \
+                    LWU(reg, xRSP, entry);               \
+                else                                     \
+                    LD(reg, xRSP, entry);                \
+                if (flush) ADDI(xRSP, xRSP, flush);      \
+            }                                            \
+        } else if (rex.is32bits) {                       \
+            POP1_32(reg);                                \
+        } else {                                         \
+            POP1(reg);                                   \
+        }                                                \
+    } while (0)
+
 #define PUSH1_16(reg)                             \
     do {                                          \
         if (cpuext.xtheadmemidx && reg != xRSP) { \
@@ -543,10 +603,18 @@
 #define FENCE_R_RW()          EMIT(FENCE_gen(2, 3))
 #define FENCE_W_W()           EMIT(FENCE_gen(1, 1))
 #define FENCE_RW_RW()         EMIT(FENCE_gen(3, 3))
+#define FENCE_TSO()           EMIT(FENCE_gen(3, 3) | (8u << 28))
 
 #define DMB_ISH()   FENCE_RW_RW()
 #define DMB_ISHLD() FENCE_R_RW()
 #define DMB_ISHST() FENCE_W_W()
+#define DMB_TSO()                                  \
+    do {                                           \
+        if (cpuext.vector && !cpuext.xtheadvector) \
+            FENCE_TSO();                           \
+        else                                       \
+            FENCE_RW_RW();                         \
+    } while (0)
 
 #define FENCE_I_gen() ((0b001 << 12) | 0b0001111)
 #define FENCE_I()     EMIT(FENCE_I_gen())
@@ -601,14 +669,14 @@
             ADDI(rd, rs1, imm12);  \
         } else {                   \
             ADDIW(rd, rs1, imm12); \
-            ZEROUP(rd);            \
+            ZEROUP32_RESULT(rd);   \
         }                          \
     } while (0)
 #define ADDIy(rd, rs1, imm12)           \
     do {                                \
         if (rex.is32bits || rex.is67) { \
             ADDIW(rd, rs1, imm12);      \
-            ZEROUP(rd);                 \
+            ZEROUP32_RESULT(rd);        \
         } else {                        \
             ADDI(rd, rs1, imm12);       \
         }                               \
@@ -629,7 +697,7 @@
 #define ADDSLy(rd, rs1, rs2, imm2, scratch) \
     if (rex.is32bits || rex.is67) {         \
         ADDSL(rd, rs1, rs2, imm2, scratch); \
-        ZEROUP(rd);                         \
+        ZEROUP32_RESULT(rd);                \
     } else {                                \
         ADDSL(rd, rs1, rs2, imm2, scratch); \
     }
@@ -649,7 +717,8 @@
             SLL(rd, rs1, rs2);  \
         } else {                \
             SLLW(rd, rs1, rs2); \
-            ZEROUP(rd);         \
+            UP32_WRITE32(rd);   \
+            ZEROUP_RESULT(rd);  \
         }                       \
     } while (0)
 
@@ -659,7 +728,8 @@
             SRL(rd, rs1, rs2);  \
         } else {                \
             SRLW(rd, rs1, rs2); \
-            ZEROUP(rd);         \
+            UP32_WRITE32(rd);   \
+            ZEROUP_RESULT(rd);  \
         }                       \
     } while (0)
 
@@ -669,7 +739,8 @@
             SRA(rd, rs1, rs2);  \
         } else {                \
             SRAW(rd, rs1, rs2); \
-            ZEROUP(rd);         \
+            UP32_WRITE32(rd);   \
+            ZEROUP_RESULT(rd);  \
         }                       \
     } while (0)
 
@@ -682,14 +753,16 @@
             SLLI(rd, rs1, imm);  \
         } else {                 \
             SLLIW(rd, rs1, imm); \
-            ZEROUP(rd);          \
+            UP32_WRITE32(rd);    \
+            ZEROUP_RESULT(rd);   \
         }                        \
     } while (0)
 #define SLLIy(rd, rs1, imm)             \
     do {                                \
         if (rex.is32bits || rex.is67) { \
             SLLIW(rd, rs1, imm);        \
-            ZEROUP(rd);                 \
+            UP32_WRITE32(rd);           \
+            ZEROUP_RESULT(rd);          \
         } else {                        \
             SLLI(rd, rs1, imm);         \
         }                               \
@@ -697,14 +770,17 @@
 // Shift Right Logical Immediate, 32-bit, sign-extended
 #define SRLIW(rd, rs1, imm5) EMIT(I_type(imm5, rs1, 0b101, rd, 0b0011011))
 // Shift Right Logical Immediate
-#define SRLIxw(rd, rs1, imm)            \
-    do {                                \
-        if (rex.w) {                    \
-            SRLI(rd, rs1, imm);         \
-        } else {                        \
-            SRLIW(rd, rs1, imm);        \
-            if ((imm) == 0) ZEROUP(rd); \
-        }                               \
+#define SRLIxw(rd, rs1, imm)       \
+    do {                           \
+        if (rex.w) {               \
+            SRLI(rd, rs1, imm);    \
+        } else {                   \
+            SRLIW(rd, rs1, imm);   \
+            if ((imm) == 0) {      \
+                UP32_WRITE32(rd);  \
+                ZEROUP_RESULT(rd); \
+            }                      \
+        }                          \
     } while (0)
 // Shift Right Arithmetic Immediate, 32-bit, sign-extended
 #define SRAIW(rd, rs1, imm5) EMIT(I_type((imm5) | (0b0100000 << 5), rs1, 0b101, rd, 0b0011011))
@@ -715,7 +791,8 @@
             SRAI(rd, rs1, imm);  \
         } else {                 \
             SRAIW(rd, rs1, imm); \
-            ZEROUP(rd);          \
+            UP32_WRITE32(rd);    \
+            ZEROUP_RESULT(rd);   \
         }                        \
     } while (0)
 
@@ -894,6 +971,8 @@
 #define FCVTSD(frd, frs1) EMIT(R_type(0b0100000, 0b00001, frs1, 0b111, frd, 0b1010011))
 // Convert Single frs1 to Double frd
 #define FCVTDS(frd, frs1) EMIT(R_type(0b0100001, 0b00000, frs1, 0b111, frd, 0b1010011))
+#define FROUNDS(frd, frs1, rm, nx) EMIT(R_type(0b0100000, 4 | (nx), frs1, rm, frd, 0b1010011))
+#define FROUNDD(frd, frs1, rm, nx) EMIT(R_type(0b0100001, 4 | (nx), frs1, rm, frd, 0b1010011))
 // Convert from Double to signed 32bits
 #define FCVTWD(rd, frs1, rm) EMIT(R_type(0b1100001, 0b00000, frs1, rm, rd, 0b1010011))
 // Convert from Double to unsigned 32bits
@@ -1134,14 +1213,14 @@
     }
 
 // Insert low 16bits in rs to low 16bits of rd
-#define INSH(rd, rs, s1, s2, init_s1, zexth_rs) \
-    if (init_s1) LUI(s1, 0xffff0);              \
-    AND(rd, rd, s1);                            \
-    if (zexth_rs) {                             \
-        ZEXTH(s2, rs);                          \
-        OR(rd, rd, s2);                         \
-    } else {                                    \
-        OR(rd, rd, rs);                         \
+#define INSH(rd, rs, s1, s2, init_s1, zexth_rs)  \
+    if (init_s1) MOV64x(s1, 0xFFFFFFFFFFFF0000); \
+    AND(rd, rd, s1);                             \
+    if (zexth_rs) {                              \
+        ZEXTH(s2, rs);                           \
+        OR(rd, rd, s2);                          \
+    } else {                                     \
+        OR(rd, rd, rs);                          \
     }
 
 // Insert low 16bits in rs to low 16bits of rd
@@ -1224,7 +1303,7 @@
             OR(s1, s1, s3);            \
             OR(s1, s1, s4);            \
             SLLIW(s3, rs, 8);          \
-            LUI(s2, 0xff0);            \
+            MOV32w(s2, 0xFF0000);      \
             AND(s3, s3, s2);           \
             OR(rd, s1, s3);            \
         }                              \
@@ -1260,15 +1339,14 @@
 // Single-bit Set (Immediate)
 #define BSETI_(rd, rs1, imm) EMIT(R_type(0b0010100, imm, rs1, 0b001, rd, 0b0010011))
 // Single-bit Set (Immediate), with fallback (s0 is used as a scratch register)
-#define BSETI(rd, rs1, imm, s0)   \
-    do {                          \
-        if (cpuext.zbs)           \
-            BSETI_(rd, rs1, imm); \
-        else {                    \
-            ADDI(s0, xZR, 1);     \
-            SLLI(s0, s0, (imm));  \
-            OR(rd, rs1, s0);      \
-        }                         \
+#define BSETI(rd, rs1, imm, s0)        \
+    do {                               \
+        if (cpuext.zbs)                \
+            BSETI_(rd, rs1, imm);      \
+        else {                         \
+            MOV64x(s0, 1ULL << (imm)); \
+            OR(rd, rs1, s0);           \
+        }                              \
     } while (0)
 
 // Single-bit Extract (Register)
@@ -1600,10 +1678,13 @@
 #define VECTOR_SEWNA  0b111  // N/A
 #define VECTOR_SEWANY 0b1000 // any sew would be ok, but not N/A.
 
-#define VECTOR_LMUL1 0b000
-#define VECTOR_LMUL2 0b001
-#define VECTOR_LMUL4 0b010
-#define VECTOR_LMUL8 0b011
+#define VECTOR_LMUL1  0b000
+#define VECTOR_LMUL2  0b001
+#define VECTOR_LMUL4  0b010
+#define VECTOR_LMUL8  0b011
+#define VECTOR_LMULF2 0b111
+#define VECTOR_LMULF4 0b110
+#define VECTOR_LMULF8 0b101
 
 #define VECTOR_MASKED   0
 #define VECTOR_UNMASKED 1
@@ -1852,6 +1933,7 @@
 #define VOR_VX(vd, vs2, rs1, vm)        EMIT(R_type(0b0010100 | (vm), vs2, rs1, 0b100, vd, 0b1010111)) // 001010...........100.....1010111
 #define VXOR_VX(vd, vs2, rs1, vm)       EMIT(R_type(0b0010110 | (vm), vs2, rs1, 0b100, vd, 0b1010111)) // 001011...........100.....1010111
 #define VRGATHER_VX(vd, vs2, rs1, vm)   EMIT(R_type(0b0011000 | (vm), vs2, rs1, 0b100, vd, 0b1010111)) // 001100...........100.....1010111
+#define VWSLL_VX(vd, vs2, rs1, vm)      EMIT(R_type(0b1101010 | (vm), vs2, rs1, 0b100, vd, 0b1010111)) // 110101...........100.....1010111
 #define VSLIDEUP_VX(vd, vs2, rs1, vm)   EMIT(R_type(0b0011100 | (vm), vs2, rs1, 0b100, vd, 0b1010111)) // 001110...........100.....1010111
 #define VSLIDEDOWN_VX(vd, vs2, rs1, vm) EMIT(R_type(0b0011110 | (vm), vs2, rs1, 0b100, vd, 0b1010111)) // 001111...........100.....1010111
 
@@ -1895,6 +1977,7 @@
 #define VMIN_VV(vd, vs2, vs1, vm)         EMIT(R_type(0b0001010 | (vm), vs2, vs1, 0b000, vd, 0b1010111)) // 000101...........000.....1010111
 #define VMAXU_VV(vd, vs2, vs1, vm)        EMIT(R_type(0b0001100 | (vm), vs2, vs1, 0b000, vd, 0b1010111)) // 000110...........000.....1010111
 #define VMAX_VV(vd, vs2, vs1, vm)         EMIT(R_type(0b0001110 | (vm), vs2, vs1, 0b000, vd, 0b1010111)) // 000111...........000.....1010111
+#define VANDN_VV(vd, vs2, vs1, vm)        EMIT(R_type(0b0000010 | (vm), vs2, vs1, 0b000, vd, 0b1010111)) // 000001...........000.....1010111
 #define VAND_VV(vd, vs2, vs1, vm)         EMIT(R_type(0b0010010 | (vm), vs2, vs1, 0b000, vd, 0b1010111)) // 001001...........000.....1010111
 #define VOR_VV(vd, vs2, vs1, vm)          EMIT(R_type(0b0010100 | (vm), vs2, vs1, 0b000, vd, 0b1010111)) // 001010...........000.....1010111
 #define VXOR_VV(vd, vs2, vs1, vm)         EMIT(R_type(0b0010110 | (vm), vs2, vs1, 0b000, vd, 0b1010111)) // 001011...........000.....1010111
@@ -1941,6 +2024,7 @@
 #define VOR_VI(vd, vs2, simm5, vm)        EMIT(R_type(0b0010100 | (vm), vs2, simm5, 0b011, vd, 0b1010111)) // 001010...........011.....1010111
 #define VXOR_VI(vd, vs2, simm5, vm)       EMIT(R_type(0b0010110 | (vm), vs2, simm5, 0b011, vd, 0b1010111)) // 001011...........011.....1010111
 #define VRGATHER_VI(vd, vs2, simm5, vm)   EMIT(R_type(0b0011000 | (vm), vs2, simm5, 0b011, vd, 0b1010111)) // 001100...........011.....1010111
+#define VWSLL_VI(vd, vs2, uimm5, vm)      EMIT(R_type(0b1101010 | (vm), vs2, uimm5, 0b011, vd, 0b1010111)) // 110101...........011.....1010111
 #define VSLIDEUP_VI(vd, vs2, simm5, vm)   EMIT(R_type(0b0011100 | (vm), vs2, simm5, 0b011, vd, 0b1010111)) // 001110...........011.....1010111
 #define VSLIDEDOWN_VI(vd, vs2, simm5, vm) EMIT(R_type(0b0011110 | (vm), vs2, simm5, 0b011, vd, 0b1010111)) // 001111...........011.....1010111
 
@@ -2023,7 +2107,7 @@
 #define VMSIF_M(vd, vs2, vm)  EMIT(R_type((cpuext.xtheadvector ? 0b0101100 : 0b0101000) | (vm), vs2, 0b00011, 0b010, vd, 0b1010111)) // 010100......00011010.....1010111
 #define VIOTA_M(vd, vs2, vm)  EMIT(R_type((cpuext.xtheadvector ? 0b0101100 : 0b0101000) | (vm), vs2, 0b10000, 0b010, vd, 0b1010111)) // 010100......10000010.....1010111
 #define VCPOP_M(rd, vs2, vm)  EMIT(R_type((cpuext.xtheadvector ? 0b0101100 : 0b0100000) | (vm), vs2, 0b10000, 0b010, rd, 0b1010111)) // 010000......10000010.....1010111
-#define VFIRST_M(rd, vs2, vm) EMIT(R_type((cpuext.xtheadvector ? 0b0101100 : 0b0100000) | (vm), vs2, 0b10001, 0b010, rd, 0b1010111)) // 010000......10001010.....1010111
+#define VFIRST_M(rd, vs2, vm) EMIT(R_type((cpuext.xtheadvector ? 0b0101010 : 0b0100000) | (vm), vs2, cpuext.xtheadvector ? 0 : 0b10001, 0b010, rd, 0b1010111)) // 010000......10001010.....1010111
 
 #define VID_V(vd, vm) EMIT(R_type((cpuext.xtheadvector ? 0b0101100 : 0b0101000) | (vm), 0b00000, 0b10001, 0b010, vd, 0b1010111)) // 010100.0000010001010.....1010111
 
@@ -2047,6 +2131,8 @@
 #define VWADD_WV(vd, vs2, vs1, vm)    EMIT(R_type(0b1101010 | (vm), vs2, vs1, 0b010, vd, 0b1010111)) // 110101...........010.....1010111
 #define VWSUBU_WV(vd, vs2, vs1, vm)   EMIT(R_type(0b1101100 | (vm), vs2, vs1, 0b010, vd, 0b1010111)) // 110110...........010.....1010111
 #define VWSUB_WV(vd, vs2, vs1, vm)    EMIT(R_type(0b1101110 | (vm), vs2, vs1, 0b010, vd, 0b1010111)) // 110111...........010.....1010111
+#define VCLMUL_VV(vd, vs2, vs1, vm)   EMIT(R_type(0b0011000 | (vm), vs2, vs1, 0b010, vd, 0b1010111)) // 001100...........010.....1010111
+#define VCLMULH_VV(vd, vs2, vs1, vm)  EMIT(R_type(0b0011010 | (vm), vs2, vs1, 0b010, vd, 0b1010111)) // 001101...........010.....1010111
 #define VWMULU_VV(vd, vs2, vs1, vm)   EMIT(R_type(0b1110000 | (vm), vs2, vs1, 0b010, vd, 0b1010111)) // 111000...........010.....1010111
 #define VWMULSU_VV(vd, vs2, vs1, vm)  EMIT(R_type(0b1110100 | (vm), vs2, vs1, 0b010, vd, 0b1010111)) // 111010...........010.....1010111
 #define VWMUL_VV(vd, vs2, vs1, vm)    EMIT(R_type(0b1110110 | (vm), vs2, vs1, 0b010, vd, 0b1010111)) // 111011...........010.....1010111

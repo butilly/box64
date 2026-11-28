@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+
 #define INIT uintptr_t sav_addr = addr
 #define FINI                           \
     dyn->isize = addr - sav_addr;      \
@@ -38,10 +39,8 @@
     do {                                                                                                \
         dyn->insts[ninst].x64.set_flags = A;                                                            \
         dyn->insts[ninst].x64.state_flags = (B) & ~SF_DF;                                               \
-        if (((B) & SF_SET_PENDING) != SF_SET_PENDING) {                                                 \
-            dyn->f = ((B) & SF_SET) ? (((B) == SF_SET_NODF) ? dyn->f : status_none_pending)             \
-                                    : ((dyn->f == status_none) ? status_none : status_none_pending);    \
-        }                                                                                               \
+        dyn->f = ((B) & SF_SET) ? (((B) == SF_SET_NODF) ? dyn->f : status_none_pending)                 \
+                                : (((B) & SF_SET_PENDING) ? status_set : status_none_pending);          \
         if (!BOX64ENV(dynarec_df)) {                                                                    \
             dyn->f = status_none;                                                                       \
             if ((A) == SF_PENDING) {                                                                    \
@@ -70,17 +69,10 @@
     } else                                         \
         dyn->insts[ninst].barrier_maybe = 1
 #define SET_HASCALLRET() dyn->insts[ninst].x64.has_callret = 1
-#define MARK_LEAF_CALL() dyn->insts[ninst].x64.leaf_kind = LEAF_KIND_CALL
-#define MARK_LEAF_CALL_TARGET(T)                            \
-    do {                                                    \
-        dyn->insts[ninst].x64.leaf_kind = LEAF_KIND_CALL;   \
-        dyn->insts[ninst].x64.leaf_target = (uintptr_t)(T); \
-    } while (0)
-#define MARK_LEAF_RET()  dyn->insts[ninst].x64.leaf_kind = LEAF_KIND_RET
-#define MARK_LEAF_RSP(F) dyn->insts[ninst].x64.leaf_rsp |= (F)
 #define NEW_INST                                                                                                 \
     ++dyn->size;                                                                                                 \
     dyn->insts[ninst].x64.addr = ip;                                                                             \
+    dyn->insts[ninst].rsp_class = 0;                                                                             \
     dyn->lsx.combined1 = dyn->lsx.combined2 = 0;                                                                 \
     dyn->lsx.swapped = 0;                                                                                        \
     dyn->lsx.barrier = 0;                                                                                        \
@@ -96,6 +88,7 @@
     dyn->insts[ninst].host_call = 0;                                                                             \
     dyn->insts[ninst].call_window = 0;                                                                           \
     dyn->insts[ninst].f_entry = dyn->f;                                                                          \
+    READ_VOLATILE_FENCE();                                                                                       \
     if (ninst) { dyn->insts[ninst - 1].x64.size = dyn->insts[ninst].x64.addr - dyn->insts[ninst - 1].x64.addr; } \
     AREFLAGSNEEDED()
 

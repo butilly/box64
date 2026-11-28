@@ -265,8 +265,9 @@ elseif(LARCH64)
     set(ASMFLAGS  -pipe -march=loongarch64)
 elseif(RV64)
     add_definitions(-DRV64)
-    set(CFLAGS -pipe -march=rv64gc)
+    set(CFLAGS -pipe -march=rv64gc -fno-tree-vectorize)
     set(ASMFLAGS  -pipe -march=rv64gc)
+    add_compile_options(-fno-tree-vectorize)
 elseif(PPC64LE)
     add_definitions(-DPPC64LE)
     set(CFLAGS -pipe -mcpu=power9)
@@ -384,6 +385,9 @@ endif()
 set(BOX64_ROOT ${CMAKE_SOURCE_DIR})
 
 add_definitions(-std=gnu11 -funwind-tables -fvisibility=hidden)
+add_definitions(-D_GNU_SOURCE=1)
+add_definitions(-D_FILE_OFFSET_BITS=64)
+list(APPEND CMAKE_REQUIRED_DEFINITIONS -D_GNU_SOURCE)
 
 if(USE_CCACHE)
     find_program(CCACHE_FOUND ccache)
@@ -414,6 +418,8 @@ add_custom_target(generate_dynacache_hashes
     BYPRODUCTS "${DYNACACHE_HASH_HEADER}"
     VERBATIM
 )
+
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/LibcChecks.cmake)
 
 # generated files
 set_source_files_properties(
@@ -474,6 +480,7 @@ set(ELFLOADER_SRC
     "${BOX64_ROOT}/src/libtools/syscall_user_dispatch.c"
     "${BOX64_ROOT}/src/libtools/decopcode.c"
     "${BOX64_ROOT}/src/libtools/threads.c"
+    "${BOX64_ROOT}/src/libtools/libc.c"
     "${BOX64_ROOT}/src/steamwebhelper.c"
     "${BOX64_ROOT}/src/tools/bitutils.c"
     "${BOX64_ROOT}/src/tools/box64stack.c"
@@ -490,11 +497,12 @@ set(ELFLOADER_SRC
     "${BOX64_ROOT}/src/tools/dynacache.c"
     "${BOX64_ROOT}/src/tools/wine_tools.c"
     "${BOX64_ROOT}/src/tools/pe_tools.c"
+    "${BOX64_ROOT}/src/tools/volatile_fences.c"
     "${BOX64_ROOT}/src/wrapped/generated/wrapper.c"
 )
 if(NOT STATICBUILD)
     list(APPEND ELFLOADER_SRC
-        "${BOX64_ROOT}/src/mallochook.c"
+        "${BOX64_ROOT}/src/guestalloc.c"
         "${BOX64_ROOT}/src/steam.c"
         "${BOX64_ROOT}/src/libtools/sdl1rwops.c"
         "${BOX64_ROOT}/src/libtools/sdl2rwops.c"
@@ -1030,6 +1038,7 @@ if(DYNAREC)
         "${BOX64_ROOT}/src/dynarec/dynarec_native_functions.c"
         "${BOX64_ROOT}/src/dynarec/dynacache_reloc.c"
         "${BOX64_ROOT}/src/dynarec/dynacache_compress.c"
+        "${BOX64_ROOT}/src/tools/tbb.c"
         "${BOX64_ROOT}/src/emu/x64test.c"
     )
 endif()
@@ -1103,6 +1112,7 @@ if(RV64_DYNAREC)
         "${BOX64_ROOT}/src/dynarec/rv64/rv64_printer.c"
         "${BOX64_ROOT}/src/dynarec/rv64/dynarec_rv64_jmpnext.c"
         "${BOX64_ROOT}/src/dynarec/rv64/dynarec_rv64_consts.c"
+        "${BOX64_ROOT}/src/dynarec/rv64/rv64_mov_imm.c"
         "${BOX64_ROOT}/src/dynarec/rv64/updateflags_rv64.c"
         )
     set(DYNAREC_ASM
@@ -1115,6 +1125,7 @@ if(RV64_DYNAREC)
 
     set(DYNAREC_PASS
     "${BOX64_ROOT}/src/dynarec/rv64/dynarec_rv64_helper.c"
+    "${BOX64_ROOT}/src/dynarec/rv64/dynarec_rv64_simd.c"
     "${BOX64_ROOT}/src/dynarec/rv64/updateflags_rv64_pass.c"
     "${BOX64_ROOT}/src/dynarec/rv64/dynarec_rv64_emit_tests.c"
     "${BOX64_ROOT}/src/dynarec/rv64/dynarec_rv64_emit_math.c"
@@ -1126,6 +1137,10 @@ if(RV64_DYNAREC)
     "${BOX64_ROOT}/src/dynarec/rv64/dynarec_rv64_00_2.c"
     "${BOX64_ROOT}/src/dynarec/rv64/dynarec_rv64_00_3.c"
     "${BOX64_ROOT}/src/dynarec/rv64/dynarec_rv64_0f.c"
+    "${BOX64_ROOT}/src/dynarec/rv64/dynarec_rv64_0f_0.c"
+    "${BOX64_ROOT}/src/dynarec/rv64/dynarec_rv64_0f_1.c"
+    "${BOX64_ROOT}/src/dynarec/rv64/dynarec_rv64_0f_2.c"
+    "${BOX64_ROOT}/src/dynarec/rv64/dynarec_rv64_0f_3.c"
     "${BOX64_ROOT}/src/dynarec/rv64/dynarec_rv64_0f_vector.c"
     "${BOX64_ROOT}/src/dynarec/rv64/dynarec_rv64_66.c"
     "${BOX64_ROOT}/src/dynarec/rv64/dynarec_rv64_d8.c"
@@ -1379,6 +1394,8 @@ if(NOT NOBOX64)
     endif()
     target_link_libraries(${BOX64} interpreter)
 
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/MuslCompatLibs.cmake)
+
     if(${CMAKE_VERSION} VERSION_LESS "3.13")
         if(NOT NOLOADADDR)
             if(CMAKE_C_COMPILER_ID STREQUAL "Clang" OR WITH_MOLD)
@@ -1557,6 +1574,9 @@ if(NOT _x86 AND NOT _x86_64 AND NOT NOBOX64)
 
   endif()
   set(INSTALL_PATH "/usr/lib/box64-x86_64-linux-gnu")
+  if(NOT NO_LIB_INSTALL AND NOT TERMUX AND NOT ANDROID)
+    install(FILES ${CMAKE_SOURCE_DIR}/x64lib/libwemeet_unlock_shim.so.1 DESTINATION ${INSTALL_PATH})
+  endif()
   if(NOT NO_LIB_INSTALL)
 	if(NOT TERMUX AND NOT ANDROID)
         install(FILES ${CMAKE_SOURCE_DIR}/x64lib/libstdc++.so.5 DESTINATION ${INSTALL_PATH})
@@ -1638,7 +1658,7 @@ if(BUNDLE_X86_LIBS)
     install(CODE "
         message(STATUS \"Installing the x86 and x86_64 libraries bundle\")
         execute_process(
-            COMMAND \"${BOX64_ROOT}/box64-bundle-x86-libs.sh\" --install
+            COMMAND \"${BOX64_ROOT}/bundle/box64-bundle-x86-libs.sh\" --install
             WORKING_DIRECTORY \"${BOX64_ROOT}\"
             RESULT_VARIABLE BUNDLE_X86_LIBS_RESULT)
         if(NOT BUNDLE_X86_LIBS_RESULT EQUAL 0)
@@ -1675,6 +1695,7 @@ if(ARM64EC)
         SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/wine/box64ec"
         CMAKE_ARGS
             -DCMAKE_TOOLCHAIN_FILE=${CMAKE_CURRENT_SOURCE_DIR}/wine/toolchain_mingw_arm64ec.cmake
+            -DDYNAREC_PASS_STR=${DYNAREC_PASS_STR}
             -DINTERPRETER_STR=${INTERPRETER_STR}
             -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
         INSTALL_COMMAND ""

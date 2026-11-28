@@ -2,6 +2,7 @@
 #ifndef __DYNAREC_RV64_PRIVATE_H_
 #define __DYNAREC_RV64_PRIVATE_H_
 #include <stdint.h>
+#include <assert.h>
 
 #include "../dynarec_private.h"
 
@@ -20,20 +21,14 @@ typedef struct box64env_s box64env_t;
 #define EXT_CACHE_SS     5
 #define EXT_CACHE_SD     6
 #define EXT_CACHE_SCR    7
-#define EXT_CACHE_XMMW   8
-#define EXT_CACHE_XMMR   9
+#define EXT_CACHE_SIMD   8
 #define EXT_CACHE_MMV    10
 
-#define EXT_CACHE_OLD_SD   0
-#define EXT_CACHE_OLD_SS   1
-#define EXT_CACHE_OLD_XMMW 2
-#define EXT_CACHE_OLD_XMMR 3
-
 typedef union ext_cache_s {
-    int8_t           v;
+    int16_t v;
     struct {
-        uint8_t t:4;   // reg type
-        uint8_t n:4;   // reg number
+        uint16_t t : 4; // reg type
+        uint16_t n : 4; // reg number
     };
 } ext_cache_t;
 
@@ -46,24 +41,31 @@ typedef union mmx_cache_s {
 } mmx_cache_t;
 
 typedef union sse_cache_s {
-    int16_t v;
+    int32_t v;
     struct {
-        uint16_t reg : 13;
-        uint16_t vector : 1;
-        uint16_t single : 1;
-        uint16_t write : 1;
+        uint32_t reg : 13;
+        uint32_t vector : 1;
+        uint32_t single : 1;
     };
 } sse_cache_t;
 
-typedef union sse_old_s {
-    int8_t      v;
-    struct {
-        uint8_t     changed:1;
-        uint8_t     purged:1;
-        uint8_t     reg:4;
-        uint8_t     type:2;
-    };
-} sse_old_t;
+// Architectural regions are independent of RVV SEW and VL. A dirty region
+// must be resident or reconstructible as a known zero; otherwise memory owns it.
+enum {
+    SIMD_LO32 = 1,  // [31:0]
+    SIMD_HI32 = 2,  // [63:32]
+    SIMD_HI64 = 4,  // [127:64]
+    SIMD_HI128 = 8, // [255:128]
+    SIMD_LO64 = SIMD_LO32 | SIMD_HI32,
+    SIMD_XMM = SIMD_LO64 | SIMD_HI64,
+    SIMD_YMM = SIMD_XMM | SIMD_HI128,
+};
+
+typedef struct simd_cache_s {
+    uint8_t valid; // architectural bits currently held in the vector register
+    uint8_t zero;  // architectural zeros, possibly not materialized
+    uint8_t dirty; // backing memory may be stale
+} simd_cache_t;
 
 typedef struct extcache_s {
     // ext cache
@@ -78,18 +80,21 @@ typedef struct extcache_s {
     uint8_t             barrier;        // is there a barrier at instruction epilog?
     uint8_t             pushed;         // positive pushed value (to check for overflow)
     uint8_t             poped;          // positive poped value (to check for underflow)
-    uint32_t            news;           // bitmask, wich neoncache are new for this opcode
-    sse_old_t           olds[16];       // SSE regs has changed or has been removed
+    uint32_t            news;           // bitmask, new physical cache slots for this instruction
+    ext_cache_t         olds[24];       // cache descriptors changed or removed by this instruction
     // fpu cache
     int8_t              x87cache[8];    // cache status for the 8 x87 register behind the fpu stack
     int8_t              x87reg[8];      // reg used for x87cache entry
     int16_t             tags;           // similar to fpu_tags
     mmx_cache_t         mmxcache[8];    // cache status for the 8 MMX registers
+    simd_cache_t        simd[16], simd_old[16];
+    uint16_t            simd_saved;
     sse_cache_t         ssecache[16];   // cache status for the 16 SSE(2) registers
     int8_t              fpuused[32];    // all double reg from fpu, used by x87, mmx, sse and avx
     int8_t              x87stack;       // cache stack counter
     int8_t              mmxcount;       // number of mmx register used (not both mmx and x87 at the same time)
-    int8_t              fpu_scratch;    // scratch counter
+    int8_t              fpu_scratch;    // scalar FP scratch counter
+    uint16_t            vpu_scratch;    // RVV scratch registers v1-v15 in use
 } extcache_t;
 
 typedef enum flagcache_s {
@@ -101,6 +106,24 @@ typedef enum flagcache_s {
 
 typedef struct callret_s callret_t;
 
+#define XMMOFF(a)   (offsetof(x64emu_t, ymm256) + (a) * sizeof(avx_regs_t) + offsetof(avx_regs_t, r.lo))
+#define YMMOFF(a)   (offsetof(x64emu_t, ymm256) + (a) * sizeof(avx_regs_t) + offsetof(avx_regs_t, r.hi))
+
+#define RSP_CLASS_BARRIER 0
+#define RSP_CLASS_PUSH    1
+#define RSP_CLASS_POP     2
+
+// A zero VL denotes unknown configuration. Guest vector operations use tu/mu.
+typedef union rvv_config_s {
+    uint32_t bits;
+    struct {
+        uint32_t sew : 3;
+        uint32_t lmul : 3;
+        uint32_t vl : 16;
+        uint32_t policy : 2;
+    };
+} rvv_config_t;
+
 typedef struct instruction_rv64_s {
     instruction_x64_t   x64;
     uintptr_t           address;    // (start) address of the riscv emitted instruction
@@ -111,13 +134,13 @@ typedef struct instruction_rv64_s {
     int                 *pred;      // predecessor array
     uintptr_t           mark[4];
     uintptr_t           markf[2];
+    uintptr_t           markfnan;
     uintptr_t           markseg;
     uintptr_t           marklock;
     uintptr_t           marklock2;
     int                 pass2choice;// value for choices that are fixed on pass2 for pass3
     uintptr_t           natcall;
     uint16_t            retn;
-    uint16_t            ymm0_pass2, ymm0_pass3;
     int                 barrier_maybe;
     uint8_t             will_write:2;    // [strongmem] will write to memory
     uint8_t             will_read:1;     // [strongmem] will read from memory
@@ -130,17 +153,37 @@ typedef struct instruction_rv64_s {
     uint8_t             nat_flags_carry:1;
     uint8_t             nat_flags_sign:1;
     uint8_t             nat_flags_needsign:1;
+    uint8_t             nat_flags_needunsigned:1;
     uint8_t             unaligned:1;    // this opcode can be re-generated for unaligned special case
     uint8_t             x87precision:1; // this opcode can handle x87pc
     uint8_t             no_scratch_usage:1; // this opcode does not use scratch register
     uint8_t             nat_flags_op1;
     uint8_t             nat_flags_op2;
     uint16_t            nat_next_inst;
+    uint32_t            nat_flags_live; // host GPR operands live at this instruction's entry
     flagcache_t         f_exit;     // flags status at end of instruction
     extcache_t          e;          // extcache at end of instruction (but before poping)
     flagcache_t         f_entry;    // flags status before the instruction begin
-    uint8_t             vector_sew_entry; // sew status before the instruction begin
-    uint8_t             vector_sew_exit;  // sew status at the end of instruction
+    uint64_t            simd_zero_gen, simd_zero_kill, simd_zero_in;
+    uint64_t            simd_read, simd_defs; // regional architectural effects
+    uint64_t            simd_live;  // incoming regions read before definition
+    uint64_t            simd_carry; // regions preserved across backedges
+    uint64_t            simd_kill;  // incoming regions overwritten before their first read
+    rvv_config_t        rvv_hint, rvv_entry_config;
+    uint8_t             simd_entry, simd_opaque;
+    rvv_config_t        rvv_entry;
+    rvv_config_t        rvv_exit;
+    int16_t             rsp_entry;        // pending rsp offset at entry
+    int16_t             rsp_flush;        // rsp offset to emit right after this push/pop
+    uint8_t             rsp_merge:1;      // this push/pop is emitted with merged rsp offset
+    uint8_t             rsp_class:2;      // RSP_* of this opcode (marked by the opcode handler)
+    uint8_t             rsp_span;         // push/pop depth of this opcode in bytes (0 = one delta, PUSHA/POPA = 32)
+    uint16_t            up32_read;        // bitmask of GPRs whose upper 32 bits are read by this instruction
+    uint16_t            up32_write64;     // bitmask of GPRs written as 64-bit by this instruction (upper 32 become defined)
+    uint16_t            up32_write32;     // bitmask of GPRs written as 32-bit by this instruction
+    uint16_t            up32_zero;        // bitmask of GPRs guaranteed to be zero-extended at instruction exit
+    uint16_t            up32_skip;        // bitmask of GPRs where the implicit zero-up after a 32-bit write can be skipped
+    uint16_t up32_pending;                // bitmask of GPRs whose upper 32 bits are stale at entry to this instruction
 } instruction_rv64_t;
 
 typedef struct dynarec_rv64_s {
@@ -180,17 +223,15 @@ typedef struct dynarec_rv64_s {
     uintptr_t           forward_to; // address of the next jump to (to check if everything is ok)
     int32_t             forward_size;   // size at the forward point
     int                 forward_ninst;  // ninst at the forward point
-    uint16_t            ymm_zero;   // bitmap of ymm to zero at purge
     uint8_t             always_test;
     uint8_t             abort;
-    uint8_t             vector_sew;     // current sew status
     uint8_t             vector_eew;     // current effective sew status, should only be used after SET_ELEMENT_WIDTH
-    uint8_t             inst_sew;       // sew inside current instruction, for vsetvli elimination
-    uint8_t             inst_vl;        // vl inside current instruction, for vsetvli elimination
-    uint8_t             inst_vlmul;     // vlmul inside current instruction
+    uint8_t             simd_used;      // pass 0 saw RVV operations or SIMD region effects
+    rvv_config_t        rvv;
     uint8_t             is_file_mapped; // if the memory is a mapped file (probably binary, not a memory)
     void*               gdbjit_block;
     uint32_t            need_x87check; // x87 low precision check
+    int                 x87round_active; // temporary x87 rounding mode is active across helper calls
     uint32_t            need_dump;     // need to dump the block
     int                 need_reloc; // does the dynablock need relocations
     int                 reloc_size;
@@ -199,10 +240,23 @@ typedef struct dynarec_rv64_s {
 } dynarec_rv64_t;
 
 // v0 is hardware wired to vector mask register, which should be always reserved
-// convert idx (0..23) to reg index (10..31 1..2)
-#define EXTREG(A) (((A) + 10 + ((A) > 21)) & 31)
-// convert reg index (10..31 1..2) to idx (0..23)
-#define EXTIDX(A) (((A) - 10 - ((A) < 3)) & 31)
+// convert idx (0..23) to reg index
+#define EXTREG(A) (((A) < 16) ? (16 + (A)) : ((A) - 8))
+// convert reg index (8..31) to idx (0..23)
+#define EXTIDX(A) (((A) >= 16) ? ((A) - 16) : ((A) + 8))
+
+#define XMM0    0
+#define X870    (XMM0 + 16)
+#define EMM0    (XMM0 + 16)
+#define VREG(A) EXTREG(XMM0 + (A))
+
+static inline void simd_save_entry(extcache_t* cache, int a)
+{
+    if (!(cache->simd_saved & (1u << a))) {
+        cache->simd_old[a] = cache->simd[a];
+        cache->simd_saved |= 1u << a;
+    }
+}
 
 void add_next(dynarec_rv64_t *dyn, uintptr_t addr);
 uintptr_t get_closest_next(dynarec_rv64_t *dyn, uintptr_t addr);

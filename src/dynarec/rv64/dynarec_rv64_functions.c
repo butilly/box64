@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -30,45 +29,51 @@
 #include "gdbjit.h"
 #include "perfmap.h"
 
-#define XMM0 0
-#define X870 XMM0 + 16
-#define EMM0 XMM0 + 16
-
-static int fpu_scratch_vreg(int n)
-{
-    if (n < 7)
-        return SCRATCH0 + n;
-    if (n < 13)
-        return 26 + (n - 7);
-    return ((n - 13) & 1) + 1;
-}
-
-// Get a FPU scratch reg
 int fpu_get_scratch(dynarec_rv64_t* dyn)
 {
-    return fpu_scratch_vreg(dyn->e.fpu_scratch++); // return an Sx
+    if (dyn->e.fpu_scratch < 7) return SCRATCH0 + dyn->e.fpu_scratch++;
+    abort();
 }
 
-// Get a FPU scratch reg aligned to LMUL
-int fpu_get_scratch_lmul(dynarec_rv64_t* dyn, int lmul)
+static int rvv_scratch_group_width(int lmul)
 {
-    if (cpuext.xtheadvector) {
-        int reg = SCRATCH0 + dyn->e.fpu_scratch;
-        int skip = (reg % (1 << lmul)) ? (1 << lmul) - (reg % (1 << lmul)) : 0;
-        dyn->e.fpu_scratch += skip + 1;
-        return reg + skip;
-    }
-    int n = dyn->e.fpu_scratch;
-    int reg = fpu_scratch_vreg(n);
-    int skip = (reg % (1 << lmul)) ? (1 << lmul) - (reg % (1 << lmul)) : 0;
-    dyn->e.fpu_scratch += skip + (1 << lmul);
-    return fpu_scratch_vreg(n + skip);
+    if (lmul < VECTOR_LMUL1 || lmul > VECTOR_LMUL8) abort();
+    return 1 << lmul;
 }
 
-// Reset scratch regs counter
+static int rvv_scratch_free(const dynarec_rv64_t* dyn, int base, int width)
+{
+    uint16_t group = (uint16_t)(((1u << width) - 1) << base);
+    return !(dyn->e.vpu_scratch & group);
+}
+
+static int rvv_reserve_scratch(dynarec_rv64_t* dyn, int base, int width)
+{
+    if (base < 1 || base + width > 16 || (base & (width - 1)) || !rvv_scratch_free(dyn, base, width)) abort();
+    uint16_t group = (uint16_t)(((1u << width) - 1) << base);
+    dyn->e.vpu_scratch |= group;
+    return base;
+}
+
+int vpu_get_scratch(dynarec_rv64_t* dyn)
+{
+    for (int reg = 1; reg < 16; ++reg)
+        if (rvv_scratch_free(dyn, reg, 1)) return rvv_reserve_scratch(dyn, reg, 1);
+    abort();
+}
+
+int vpu_get_scratch_lmul(dynarec_rv64_t* dyn, int lmul)
+{
+    int width = rvv_scratch_group_width(lmul);
+    for (int reg = width; reg + width <= 16; reg += width)
+        if (rvv_scratch_free(dyn, reg, width)) return rvv_reserve_scratch(dyn, reg, width);
+    abort();
+}
+
 void fpu_reset_scratch(dynarec_rv64_t* dyn)
 {
     dyn->e.fpu_scratch = 0;
+    dyn->e.vpu_scratch = 0;
 }
 // Get a x87 double reg
 int fpu_get_reg_x87(dynarec_rv64_t* dyn, int t, int n)
@@ -83,7 +88,7 @@ int fpu_get_reg_x87(dynarec_rv64_t* dyn, int t, int n)
     return EXTREG(i); // return a Dx
 }
 // Free a FPU reg
-void fpu_free_reg(dynarec_rv64_t* dyn, int reg)
+void extcache_free_reg(dynarec_rv64_t* dyn, int reg)
 {
     int idx = EXTIDX(reg);
     // TODO: check upper limit?
@@ -104,7 +109,7 @@ int fpu_get_reg_emm(dynarec_rv64_t* dyn, int t, int emm)
 }
 
 // Get an XMM reg
-int fpu_get_reg_xmm(dynarec_rv64_t* dyn, int t, int xmm)
+int simd_alloc_reg(dynarec_rv64_t* dyn, int t, int xmm)
 {
     int i = XMM0 + xmm;
     dyn->e.fpuused[i] = 1;
@@ -120,7 +125,7 @@ static void fpu_reset_reg_extcache(dynarec_rv64_t* dyn, extcache_t* e)
         e->fpuused[i] = 0;
         e->extcache[i].v = 0;
     }
-    dyn->vector_sew = VECTOR_SEWNA;
+    dyn->rvv.bits = 0;
 }
 void fpu_reset_reg(dynarec_rv64_t* dyn)
 {
@@ -361,6 +366,8 @@ static int isCacheEmpty(dynarec_native_t* dyn, int ninst)
                     && dyn->insts[ninst].e.extcache[i].n < dyn->insts[ninst].e.stack_pop))
                 return 0;
         }
+    for (int a = 0; a < 16; ++a)
+        if (dyn->insts[ninst].e.simd[a].dirty) return 0;
     return 1;
 }
 
@@ -373,61 +380,64 @@ int fpuCacheNeedsTransform(dynarec_rv64_t* dyn, int ninst)
         // if the barrier as already been apply, no transform needed
         return ((dyn->insts[ninst].x64.barrier & BARRIER_FLOAT)) ? 0 : (isCacheEmpty(dyn, ninst) ? 0 : 1);
     int ret = 0;
-    if (!i2) { // just purge
-        if (dyn->insts[ninst].e.stack_next) {
-            return 1;
-        }
-        for (int i = 0; i < 24 && !ret; ++i)
-            if (dyn->insts[ninst].e.extcache[i].v) { // there is something at ninst for i
-                if (!(
-                        (dyn->insts[ninst].e.extcache[i].t == EXT_CACHE_ST_F
-                            || dyn->insts[ninst].e.extcache[i].t == EXT_CACHE_ST_D
-                            || dyn->insts[ninst].e.extcache[i].t == EXT_CACHE_ST_I64)
-                        && dyn->insts[ninst].e.extcache[i].n < dyn->insts[ninst].e.stack_pop))
-                    ret = 1;
-            }
-        return ret;
-    }
     // Check if ninst can be compatible to i2
-    if (dyn->insts[ninst].e.stack_next != dyn->insts[i2].e.stack - dyn->insts[i2].e.stack_push) {
+    if (dyn->e.stack_next != dyn->insts[i2].e.stack - dyn->insts[i2].e.stack_push) {
         return 1;
     }
     extcache_t cache_i2 = dyn->insts[i2].e;
     extcacheUnwind(&cache_i2);
 
     for (int i = 0; i < 24; ++i) {
-        if (dyn->insts[ninst].e.extcache[i].v) { // there is something at ninst for i
+        if (i < 16
+            && (!dyn->e.extcache[i].v || dyn->e.extcache[i].t == EXT_CACHE_SIMD)
+            && (!cache_i2.extcache[i].v || cache_i2.extcache[i].t == EXT_CACHE_SIMD))
+            continue;
+        if (dyn->e.extcache[i].v) { // there is something at ninst for i
             if (!cache_i2.extcache[i].v) {       // but there is nothing at i2 for i
                 ret = 1;
-            } else if (dyn->insts[ninst].e.extcache[i].v != cache_i2.extcache[i].v) { // there is something different
-                if (dyn->insts[ninst].e.extcache[i].n != cache_i2.extcache[i].n) {    // not the same x64 reg
+            } else if (dyn->e.extcache[i].v != cache_i2.extcache[i].v) { // there is something different
+                if (dyn->e.extcache[i].n != cache_i2.extcache[i].n) {    // not the same x64 reg
                     ret = 1;
-                } else if (dyn->insts[ninst].e.extcache[i].t == EXT_CACHE_XMMR && cache_i2.extcache[i].t == EXT_CACHE_XMMW) { /* nothing */
                 } else
                     ret = 1;
             }
         } else if (cache_i2.extcache[i].v)
             ret = 1;
     }
+    for (int a = 0; a < 16; ++a) {
+        const simd_cache_t* src = &dyn->e.simd[a];
+        const simd_cache_t* dst = &cache_i2.simd[a];
+        unsigned kill = (dyn->insts[i2].simd_kill >> (a * 4)) & SIMD_YMM;
+        if ((src->dirty & ~kill & ~dst->dirty) || (dst->valid & ~(src->valid & ~kill))) return 1;
+    }
     return ret;
 }
 
-int sewNeedsTransform(dynarec_rv64_t* dyn, int ninst)
+int rvv_needs_transform(dynarec_rv64_t* dyn, int ninst)
 {
-    int i2 = dyn->insts[ninst].x64.jmp_insts;
-
-    if (dyn->insts[i2].vector_sew_entry == VECTOR_SEWNA)
-        return 0;
-    else if (dyn->insts[i2].vector_sew_entry == VECTOR_SEWANY && dyn->insts[ninst].vector_sew_exit != VECTOR_SEWNA)
-        return 0;
-    else if (dyn->insts[i2].vector_sew_entry == dyn->insts[ninst].vector_sew_exit)
-        return 0;
-
-    return 1;
+    int target = dyn->insts[ninst].x64.jmp_insts;
+    return target >= 0 && dyn->insts[target].rvv_entry.vl && dyn->insts[target].rvv_entry.bits != dyn->rvv.bits;
 }
 
 void extcacheUnwind(extcache_t* cache)
 {
+    for (int a = 0; a < 16; ++a)
+        if (cache->simd_saved & (1u << a)) cache->simd[a] = cache->simd_old[a];
+    cache->simd_saved = 0;
+    if (!cache->swapped && !cache->news && !cache->stack_push && !cache->stack_pop) {
+        int dirty = 0;
+        for (int i = 0; i < 24; ++i)
+            if (cache->olds[i].v) {
+                dirty = 1;
+                break;
+            }
+        if (!dirty) {
+            cache->barrier = 0;
+            cache->fpu_scratch = 0;
+            cache->vpu_scratch = 0;
+            return;
+        }
+    }
     if (cache->swapped) {
         // unswap
         int a = -1;
@@ -452,24 +462,16 @@ void extcacheUnwind(extcache_t* cache)
     if (cache->news) {
         // remove the newly created extcache
         for (int i = 0; i < 24; ++i)
-            if ((cache->news & (1 << i)) && !cache->olds[i].changed)
+            if (cache->news & (1u << i))
                 cache->extcache[i].v = 0;
         cache->news = 0;
     }
     // add/change bad regs
-    for (int i = 0; i < 16; ++i) {
-        if (cache->olds[i].changed || cache->olds[i].purged) {
-            if (cache->olds[i].type == EXT_CACHE_OLD_XMMR)
-                cache->extcache[i].t = EXT_CACHE_XMMR;
-            else if (cache->olds[i].type == EXT_CACHE_OLD_XMMW)
-                cache->extcache[i].t = EXT_CACHE_XMMW;
-            else if (cache->olds[i].type == EXT_CACHE_OLD_SS)
-                cache->extcache[i].t = EXT_CACHE_SS;
-            else if (cache->olds[i].type == EXT_CACHE_OLD_SD)
-                cache->extcache[i].t = EXT_CACHE_SD;
-
-            if (cache->olds[i].purged)
-                cache->extcache[i].n = i;
+    for (int i = 0; i < 24; ++i) {
+        if (cache->olds[i].v) {
+            cache->extcache[i] = cache->olds[i];
+            // the undo log has been applied, don't reapply it on a second unwind
+            cache->olds[i].v = 0;
         }
     }
 
@@ -508,6 +510,7 @@ void extcacheUnwind(extcache_t* cache)
     // And now, rebuild the x87cache info with extcache
     cache->mmxcount = 0;
     cache->fpu_scratch = 0;
+    cache->vpu_scratch = 0;
     for (int i = 0; i < 8; ++i) {
         cache->x87cache[i] = -1;
         cache->mmxcache[i].v = -1;
@@ -536,11 +539,9 @@ void extcacheUnwind(extcache_t* cache)
                     cache->ssecache[cache->extcache[i].n].vector = 0;
                     cache->ssecache[cache->extcache[i].n].single = 0;
                     break;
-                case EXT_CACHE_XMMR:
-                case EXT_CACHE_XMMW:
+                case EXT_CACHE_SIMD:
                     cache->ssecache[cache->extcache[i].n].reg = EXTREG(i);
                     cache->ssecache[cache->extcache[i].n].vector = 1;
-                    cache->ssecache[cache->extcache[i].n].write = (cache->extcache[i].t == EXT_CACHE_XMMW) ? 1 : 0;
                     break;
                 case EXT_CACHE_ST_F:
                 case EXT_CACHE_ST_D:
@@ -625,8 +626,7 @@ const char* getCacheName(int t, int n)
         case EXT_CACHE_SS: sprintf(buff, "SS%d", n); break;
         case EXT_CACHE_SD: sprintf(buff, "SD%d", n); break;
         case EXT_CACHE_SCR: sprintf(buff, "Scratch"); break;
-        case EXT_CACHE_XMMW: sprintf(buff, "XMM%d", n); break;
-        case EXT_CACHE_XMMR: sprintf(buff, "xmm%d", n); break;
+        case EXT_CACHE_SIMD: sprintf(buff, "SIMD%d", n); break;
         case EXT_CACHE_NONE: buff[0] = '\0'; break;
     }
     return buff;
@@ -715,22 +715,19 @@ void inst_name_pass3(dynarec_native_t* dyn, int ninst, const char* name, rex_t r
     }
     if (!dyn->need_dump && !BOX64ENV(dynarec_gdbjit) && !BOX64ENV(dynarec_perf_map)) return;
 
-    static char buf[4096];
-    int length = sprintf(buf, "barrier=%d state=%d/%s(%s->%s), set=%X/%X, use=%X, need=%X/%X, fuse=%d/%d, sm=%d(%d/%d), sew@entry=%d, sew@exit=%d",
-        dyn->insts[ninst].x64.barrier,
-        dyn->insts[ninst].x64.state_flags,
-        df_status[dyn->f],
-        df_status[dyn->insts[ninst].f_entry],
-        df_status[dyn->insts[ninst].f_exit],
-        dyn->insts[ninst].x64.set_flags,
-        dyn->insts[ninst].x64.gen_flags,
-        dyn->insts[ninst].x64.use_flags,
-        dyn->insts[ninst].x64.need_before,
-        dyn->insts[ninst].x64.need_after,
-        dyn->insts[ninst].nat_flags_fusion,
-        dyn->insts[ninst].no_scratch_usage,
-        dyn->smwrite, dyn->insts[ninst].will_write, dyn->insts[ninst].last_write,
-        dyn->insts[ninst].vector_sew_entry, dyn->insts[ninst].vector_sew_exit);
+    static const char* const lmul[] = { "m1", "m2", "m4", "m8", "reserved", "mf8", "mf4", "mf2" };
+    static __thread char buf[65536];
+    int length = sprintf(buf,
+        "barrier=%d state=%d/%s(%s->%s), set=%X/%X, use=%X, need=%X/%X, fuse=%d/%d, sm=%d(%d/%d), "
+        "rvv@entry=(e%d,%s,vl%d), rvv@exit=(e%d,%s,vl%d)",
+        dyn->insts[ninst].x64.barrier, dyn->insts[ninst].x64.state_flags, df_status[dyn->f], df_status[dyn->insts[ninst].f_entry], df_status[dyn->insts[ninst].f_exit],
+        dyn->insts[ninst].x64.set_flags, dyn->insts[ninst].x64.gen_flags, dyn->insts[ninst].x64.use_flags, dyn->insts[ninst].x64.need_before, dyn->insts[ninst].x64.need_after,
+        dyn->insts[ninst].nat_flags_fusion, dyn->insts[ninst].no_scratch_usage, dyn->smwrite, dyn->insts[ninst].will_write, dyn->insts[ninst].last_write,
+        8 << dyn->insts[ninst].rvv_entry.sew, lmul[dyn->insts[ninst].rvv_entry.lmul], dyn->insts[ninst].rvv_entry.vl, 8 << dyn->insts[ninst].rvv_exit.sew,
+        lmul[dyn->insts[ninst].rvv_exit.lmul], dyn->insts[ninst].rvv_exit.vl);
+    if (dyn->insts[ninst].simd_entry)
+        length += sprintf(
+            buf + length, ", simd@entry=(read=%016llx,carry=%016llx)", (unsigned long long)dyn->insts[ninst].simd_live, (unsigned long long)dyn->insts[ninst].simd_carry);
     if (dyn->insts[ninst].pred_sz) {
         length += sprintf(buf + length, ", pred=");
         for (int ii = 0; ii < dyn->insts[ninst].pred_sz; ++ii)
@@ -751,15 +748,17 @@ void inst_name_pass3(dynarec_native_t* dyn, int ninst, const char* name, rex_t r
             case EXT_CACHE_MMV: length += sprintf(buf + length, " v%d:%s", EXTREG(ii), getCacheName(dyn->insts[ninst].e.extcache[ii].t, dyn->insts[ninst].e.extcache[ii].n)); break;
             case EXT_CACHE_SS: length += sprintf(buf + length, " f%d:%s", EXTREG(ii), getCacheName(dyn->insts[ninst].e.extcache[ii].t, dyn->insts[ninst].e.extcache[ii].n)); break;
             case EXT_CACHE_SD: length += sprintf(buf + length, " f%d:%s", EXTREG(ii), getCacheName(dyn->insts[ninst].e.extcache[ii].t, dyn->insts[ninst].e.extcache[ii].n)); break;
-            case EXT_CACHE_XMMR: length += sprintf(buf + length, " v%d:%s", EXTREG(ii), getCacheName(dyn->insts[ninst].e.extcache[ii].t, dyn->insts[ninst].e.extcache[ii].n)); break;
-            case EXT_CACHE_XMMW: length += sprintf(buf + length, " v%d:%s", EXTREG(ii), getCacheName(dyn->insts[ninst].e.extcache[ii].t, dyn->insts[ninst].e.extcache[ii].n)); break;
+            case EXT_CACHE_SIMD: length += sprintf(buf + length, " v%d:%s", EXTREG(ii), getCacheName(EXT_CACHE_SIMD, dyn->insts[ninst].e.extcache[ii].n)); break;
             case EXT_CACHE_SCR: length += sprintf(buf + length, " f%d:%s", EXTREG(ii), getCacheName(dyn->insts[ninst].e.extcache[ii].t, dyn->insts[ninst].e.extcache[ii].n)); break;
             case EXT_CACHE_NONE:
             default: break;
         }
     }
-    if (dyn->ymm_zero)
-        length += sprintf(buf + length, " ymm0_mask = %04x", dyn->ymm_zero);
+    for (int a = 0; a < 16; ++a) {
+        const simd_cache_t* c = &dyn->insts[ninst].e.simd[a];
+        if (c->valid || c->zero || c->dirty)
+            length += sprintf(buf + length, " ymm%d[v=%x,z=%x,d=%x]", a, c->valid, c->zero, c->dirty);
+    }
     if (dyn->e.stack || dyn->insts[ninst].e.stack_next || dyn->insts[ninst].e.x87stack)
         length += sprintf(buf + length, " X87:%d/%d(+%d/-%d)%d", dyn->e.stack, dyn->insts[ninst].e.stack_next, dyn->insts[ninst].e.stack_push, dyn->insts[ninst].e.stack_pop, dyn->insts[ninst].e.x87stack);
     if (dyn->insts[ninst].e.combined1 || dyn->insts[ninst].e.combined2)
@@ -772,10 +771,10 @@ void inst_name_pass3(dynarec_native_t* dyn, int ninst, const char* name, rex_t r
             (void*)(dyn->native_start + dyn->insts[ninst].address), dyn->insts[ninst].size / 4, ninst, buf, (dyn->need_dump > 1) ? "\e[m" : "");
     }
     if (BOX64ENV(dynarec_gdbjit)) {
-        static char buf2[4096 + 64];
+        static __thread char buf2[4096 + 64];
         if (BOX64ENV(dynarec_gdbjit) > 1) {
-            snprintf(buf2, sizeof(buf2), "; %d: %d opcodes, %s", ninst, dyn->insts[ninst].size / 4, buf);
-            dyn->gdbjit_block = GdbJITBlockAddLine(dyn->gdbjit_block, (dyn->native_start + dyn->insts[ninst].address), buf2);
+            snprintf(buf2, sizeof(buf2), "; %d: %d opcodes, %.*s", ninst, dyn->insts[ninst].size / 4, (int)sizeof(buf2) - 64, buf);
+            GdbJITBlockAddText(dyn->gdbjit_block, buf2);
         }
         zydis_dec_t* dec = rex.is32bits ? my_context->dec32 : my_context->dec;
         const char* inst_name = name;
@@ -829,6 +828,8 @@ static void mmx_reset(extcache_t* e)
 
 static void sse_reset(extcache_t* e)
 {
+    memset(e->simd, 0, sizeof(e->simd));
+    e->simd_saved = 0;
     for (int i = 0; i < 16; ++i)
         e->ssecache[i].v = -1;
 }
@@ -839,7 +840,6 @@ void fpu_reset(dynarec_rv64_t* dyn)
     mmx_reset(&dyn->e);
     sse_reset(&dyn->e);
     fpu_reset_reg(dyn);
-    dyn->ymm_zero = 0;
 }
 
 void fpu_reset_ninst(dynarec_rv64_t* dyn, int ninst)
@@ -855,27 +855,46 @@ int fpu_is_st_freed(dynarec_rv64_t* dyn, int ninst, int st)
     return (dyn->e.tags & (0b11 << (st * 2))) ? 1 : 0;
 }
 
+static int hasLinearPredecessor(const dynarec_rv64_t* dyn, int ninst);
+
 void updateNativeFlags(dynarec_rv64_t* dyn)
 {
     if (!BOX64ENV(dynarec_nativeflags))
         return;
-    for (int i = 1; i < dyn->size; ++i)
+    for (int i = 0; i < dyn->size; ++i)
         if (dyn->insts[i].nat_flags_fusion) {
             int j = i - 1;
             int found = 0;
-            if (dyn->insts[i].pred_sz == 1 && dyn->insts[i].pred[0] == j) {
+            int last_fused = 0;
+            if (hasLinearPredecessor(dyn, i)) {
                 while (j >= 0) {
                     if (dyn->insts[j].x64.set_flags && (dyn->insts[i].x64.use_flags & dyn->insts[j].x64.set_flags) == dyn->insts[i].x64.use_flags) {
+                        int needsign = (dyn->insts[i].x64.use_flags & X_SF) ? 1 : 0;
+                        int needunsigned = (dyn->insts[i].x64.use_flags & X_CF) ? 1 : 0;
+                        if (dyn->insts[j].nat_flags_fusion && ((needsign && dyn->insts[j].nat_flags_needunsigned) || (needunsigned && dyn->insts[j].nat_flags_needsign)))
+                            break; // not compatible, stop here
                         dyn->insts[j].nat_flags_fusion = 1;
-                        if (dyn->insts[i].x64.use_flags & X_SF) {
+                        if (needsign)
                             dyn->insts[j].nat_flags_needsign = 1;
-                        }
+                        if (needunsigned)
+                            dyn->insts[j].nat_flags_needunsigned = 1;
                         dyn->insts[i].x64.use_flags = 0;
-                        dyn->insts[j].nat_next_inst = i;
+                        if (last_fused) {
+                            dyn->insts[last_fused].nat_next_inst = i;
+                        } else {
+                            uint16_t* next = &dyn->insts[j].nat_next_inst;
+                            while (*next)
+                                next = &dyn->insts[*next].nat_next_inst;
+                            *next = i;
+                        }
+                        dyn->insts[i].up32_read |= dyn->insts[j].up32_write32;
                         found = 1;
                         break;
-                    } else if (j && dyn->insts[j].pred_sz == 1 && dyn->insts[j].pred[0] == j - 1
-                        && dyn->insts[j].no_scratch_usage && !dyn->insts[j].x64.set_flags && !dyn->insts[j].x64.use_flags) {
+                    } else if (hasLinearPredecessor(dyn, j) && dyn->insts[j].nat_flags_fusion && dyn->insts[j].x64.jmp && !dyn->insts[j].x64.set_flags && !dyn->insts[j].x64.use_flags) {
+                        // already fused Jcc consumer
+                        if (!last_fused) last_fused = j;
+                        j -= 1;
+                    } else if (hasLinearPredecessor(dyn, j) && dyn->insts[j].no_scratch_usage && !dyn->insts[j].x64.set_flags && !dyn->insts[j].x64.use_flags) {
                         j -= 1;
                     } else
                         break;
@@ -912,4 +931,350 @@ void fpu_save_and_unwind(dynarec_rv64_t* dyn, int ninst, extcache_t* cache)
 void fpu_unwind_restore(dynarec_rv64_t* dyn, int ninst, extcache_t* cache)
 {
     memcpy(&dyn->insts[ninst].e, cache, sizeof(extcache_t));
+}
+
+static int hasLinearPredecessor(const dynarec_rv64_t* dyn, int ninst)
+{
+    return ninst > 0 && dyn->insts[ninst].pred_sz == 1 && dyn->insts[ninst].pred[0] == ninst - 1;
+}
+
+int isUpper32Zero(dynarec_rv64_t* dyn, int ninst, int reg)
+{
+    if (!IS_GPR(reg))
+        return 0;
+
+    const uint16_t bit = (uint16_t)(1 << TO_X64(reg));
+    int current = ninst;
+    for (int depth = 0; depth < 4 && hasLinearPredecessor(dyn, current); ++depth) {
+        const instruction_rv64_t* prev = &dyn->insts[current - 1];
+        if (prev->x64.has_callret || prev->x64.barrier)
+            return 0;
+        if (prev->up32_write64 & bit) return prev->up32_zero & bit;
+        --current;
+    }
+    return 0;
+}
+
+static void simd_analyze_zeros(dynarec_rv64_t* dyn)
+{
+    int n = dyn->size;
+    uint64_t* out = malloc(n * sizeof(*out));
+    if (!out) {
+        for (int i = 0; i < n; ++i)
+            dyn->insts[i].simd_zero_in = 0;
+        return;
+    }
+    for (int i = 0; i < n; ++i)
+        out[i] = UINT64_MAX;
+    int changed;
+    do {
+        changed = 0;
+        for (int i = 0; i < n; ++i) {
+            instruction_rv64_t* inst = &dyn->insts[i];
+            uint64_t in = i && inst->pred_sz ? UINT64_MAX : 0;
+            for (int p = 0; p < inst->pred_sz; ++p)
+                in &= out[inst->pred[p]];
+            if (inst->x64.barrier & BARRIER_FLOAT) in = 0;
+            inst->simd_zero_in = in;
+            uint64_t next = (in & ~inst->simd_zero_kill) | inst->simd_zero_gen;
+            if (inst->x64.has_callret || inst->simd_opaque) next = 0;
+            if (out[i] != next) {
+                out[i] = next;
+                changed = 1;
+            }
+        }
+    } while (changed);
+    free(out);
+}
+
+static int simd_is_entry(const dynarec_rv64_t* dyn, int i)
+{
+    if (!dyn->insts[i].x64.alive) return 0;
+    return !i || dyn->insts[i].pred_sz != 1 || dyn->insts[i].pred[0] != i - 1 || dyn->insts[i - 1].x64.jmp;
+}
+
+static int simd_boundary(const instruction_rv64_t* inst)
+{
+    return inst->simd_opaque || (inst->x64.barrier & BARRIER_FLOAT) || inst->x64.has_callret;
+}
+
+static int simd_successors(const dynarec_rv64_t* dyn, int i, int successors[2])
+{
+    const instruction_rv64_t* inst = &dyn->insts[i];
+    int count = 0;
+    if (inst->x64.has_next && i + 1 < dyn->size && dyn->insts[i + 1].x64.alive) successors[count++] = i + 1;
+    int target = inst->x64.jmp_insts;
+    if (inst->x64.jmp && target >= 0 && target < dyn->size && dyn->insts[target].x64.alive
+        && (!count || successors[0] != target))
+        successors[count++] = target;
+    return count;
+}
+
+typedef struct simd_flow_s {
+    uint64_t live;
+    uint8_t reachable, loop, queued;
+} simd_flow_t;
+
+static void simd_analyze_loop(dynarec_rv64_t* dyn, int header, simd_flow_t* flow, int* work)
+{
+    instruction_rv64_t* entry = &dyn->insts[header];
+    int has_backedge = 0;
+    for (int p = 0; p < entry->pred_sz; ++p)
+        if (entry->pred[p] >= header && dyn->insts[entry->pred[p]].x64.alive) has_backedge = 1;
+    if (!has_backedge) return;
+
+    memset(flow, 0, dyn->size * sizeof(*flow));
+    int sp = 0;
+    flow[header].reachable = 1;
+    work[sp++] = header;
+    while (sp) {
+        int successors[2];
+        int count = simd_successors(dyn, work[--sp], successors);
+        for (int s = 0; s < count; ++s) {
+            int next = successors[s];
+            if (!flow[next].reachable) {
+                flow[next].reachable = 1;
+                work[sp++] = next;
+            }
+        }
+    }
+
+    flow[header].loop = 1;
+    work[sp++] = header;
+    has_backedge = 0;
+    for (int p = 0; p < entry->pred_sz; ++p) {
+        int latch = entry->pred[p];
+        if (latch >= header && flow[latch].reachable) {
+            has_backedge = 1;
+            if (!flow[latch].loop) {
+                flow[latch].loop = 1;
+                work[sp++] = latch;
+            }
+        }
+    }
+    if (!has_backedge) return;
+    uint64_t read = 0, written = 0, nonzero = 0;
+    while (sp) {
+        int i = work[--sp];
+        const instruction_rv64_t* inst = &dyn->insts[i];
+        if (simd_boundary(inst)) return;
+        read |= inst->simd_read;
+        written |= inst->simd_defs;
+        nonzero |= inst->simd_defs & ~inst->simd_zero_gen;
+        if (i == header) continue;
+        for (int p = 0; p < inst->pred_sz; ++p) {
+            int prev = inst->pred[p];
+            if (prev >= header && flow[prev].reachable && !flow[prev].loop) {
+                flow[prev].loop = 1;
+                work[sp++] = prev;
+            }
+        }
+    }
+
+    for (int i = 0; i < dyn->size; ++i) {
+        if (flow[i].loop) {
+            flow[i].queued = 1;
+            work[sp++] = i;
+        }
+    }
+    while (sp) {
+        int i = work[--sp];
+        flow[i].queued = 0;
+        const instruction_rv64_t* inst = &dyn->insts[i];
+        int successors[2];
+        int count = simd_successors(dyn, i, successors);
+        uint64_t out = 0;
+        for (int s = 0; s < count; ++s)
+            if (flow[successors[s]].loop) out |= flow[successors[s]].live;
+        uint64_t live = inst->simd_read | (out & ~inst->simd_defs);
+        if (live == flow[i].live) continue;
+        flow[i].live = live;
+        for (int p = 0; p < inst->pred_sz; ++p) {
+            int prev = inst->pred[p];
+            if (flow[prev].loop && !flow[prev].queued) {
+                flow[prev].queued = 1;
+                work[sp++] = prev;
+            }
+        }
+    }
+    entry->simd_live |= flow[header].live;
+    entry->simd_carry = written & (nonzero | read);
+}
+
+static void simd_analyze_entries(dynarec_rv64_t* dyn)
+{
+    simd_flow_t* flow = calloc(dyn->size, sizeof(*flow));
+    int* work = malloc(dyn->size * sizeof(*work));
+    for (int i = 0; i < dyn->size; ++i) {
+        instruction_rv64_t* entry = &dyn->insts[i];
+        entry->simd_entry = 0;
+        entry->simd_live = entry->simd_carry = 0;
+        entry->simd_kill = 0;
+        entry->rvv_entry_config.bits = 0;
+        if (!entry->x64.alive || !simd_is_entry(dyn, i) || (entry->x64.barrier & BARRIER_FLOAT)) continue;
+        entry->simd_entry = 1;
+        uint64_t read = 0, written = 0;
+        for (int j = i; j < dyn->size; ++j) {
+            instruction_rv64_t* inst = &dyn->insts[j];
+            if (j != i && simd_is_entry(dyn, j)) break;
+            if (!inst->x64.alive || simd_boundary(inst)) break;
+            read |= inst->simd_read & ~written;
+            written |= inst->simd_defs;
+            if (!entry->rvv_entry_config.vl && inst->rvv_hint.vl) entry->rvv_entry_config = inst->rvv_hint;
+            if (inst->x64.jmp || !inst->x64.has_next) break;
+        }
+        entry->simd_live = read;
+        entry->simd_kill = written & ~read;
+        if (flow && work) simd_analyze_loop(dyn, i, flow, work);
+        entry->simd_carry &= ~entry->simd_kill;
+        if (cpuext.vlen < 32) {
+            entry->simd_live &= 0x7777777777777777ULL;
+            entry->simd_carry &= 0x7777777777777777ULL;
+        }
+    }
+    free(work);
+    free(flow);
+}
+
+void updateUpperLiveness(dynarec_rv64_t* dyn)
+{
+    int n = dyn->size;
+    if (n <= 0)
+        return;
+
+    if (dyn->simd_used) {
+        simd_analyze_zeros(dyn);
+        simd_analyze_entries(dyn);
+    }
+
+    static int work[MAX_INSTS];
+    static uint16_t live_in[MAX_INSTS];
+    static uint8_t on_list[MAX_INSTS];
+    memset(live_in, 0, n * sizeof(*live_in));
+
+    int sp = 0;
+    for (int i = 0; i < n; ++i) {
+        on_list[i] = !!dyn->insts[i].x64.alive;
+        if (on_list[i])
+            work[sp++] = i;
+    }
+    while (sp > 0) {
+        int i = work[--sp];
+        on_list[i] = 0;
+        instruction_rv64_t* inst = &dyn->insts[i];
+        if (!inst->x64.alive)
+            continue;
+        uint16_t combined_out = 0;
+        if (inst->x64.has_next && i + 1 < n && dyn->insts[i + 1].x64.alive)
+            combined_out |= live_in[i + 1];
+        if (inst->x64.jmp) {
+            if (inst->x64.jmp_insts >= 0 && inst->x64.jmp_insts < n)
+                combined_out |= live_in[inst->x64.jmp_insts];
+            else
+                combined_out = UINT16_MAX;
+        }
+        int has_internal_jump = inst->x64.jmp && inst->x64.jmp_insts >= 0 && inst->x64.jmp_insts < n;
+        if ((inst->x64.has_next && i == n - 1) || (!inst->x64.has_next && !has_internal_jump))
+            combined_out = UINT16_MAX;
+        inst->up32_skip = inst->up32_write32 & (uint16_t)~combined_out;
+
+        uint16_t live_in_val = inst->up32_read | (combined_out & (uint16_t)~inst->up32_write64);
+        if (live_in_val != live_in[i]) {
+            live_in[i] = live_in_val;
+            for (int p = 0; p < inst->pred_sz; ++p) {
+                int j = inst->pred[p];
+                if (!on_list[j]) {
+                    work[sp++] = j;
+                    on_list[j] = 1;
+                }
+            }
+        }
+    }
+
+    int any_pending = 0;
+    for (int i = n - 1; i >= 0; --i) {
+        instruction_rv64_t* inst = &dyn->insts[i];
+        inst->up32_pending = 0;
+        if (inst->x64.alive) {
+            work[sp++] = i;
+            on_list[i] = 1;
+        } else {
+            inst->up32_skip = inst->up32_write32;
+        }
+        any_pending |= inst->up32_skip;
+    }
+    if (!any_pending)
+        return;
+    while (sp > 0) {
+        int i = work[--sp];
+        on_list[i] = 0;
+        instruction_rv64_t* inst = &dyn->insts[i];
+        if (!inst->x64.alive)
+            continue;
+
+        uint16_t merged_pending = 0;
+        for (int p = 0; p < inst->pred_sz; ++p) {
+            int j = inst->pred[p];
+            const instruction_rv64_t* pred = &dyn->insts[j];
+            merged_pending |= (pred->up32_pending & (uint16_t)~pred->up32_write64) | pred->up32_skip;
+        }
+        if (merged_pending != inst->up32_pending) {
+            inst->up32_pending = merged_pending;
+            if (inst->x64.has_next && i + 1 < n && dyn->insts[i + 1].x64.alive && !on_list[i + 1]) {
+                work[sp++] = i + 1;
+                on_list[i + 1] = 1;
+            }
+            if (inst->x64.jmp && inst->x64.jmp_insts >= 0 && inst->x64.jmp_insts < n) {
+                int j = inst->x64.jmp_insts;
+                if (dyn->insts[j].x64.alive && !on_list[j]) {
+                    work[sp++] = j;
+                    on_list[j] = 1;
+                }
+            }
+        }
+    }
+}
+
+void updateRspMerge(dynarec_rv64_t* dyn, int is32bits)
+{
+    const int delta = is32bits ? 4 : 8;
+    int pending = 0;
+    int last_pushpop = -1;
+    for (int i = 0; i < dyn->size; ++i) {
+        instruction_rv64_t* inst = &dyn->insts[i];
+        inst->rsp_entry = 0;
+        inst->rsp_flush = 0;
+        inst->rsp_merge = 0;
+        int class = (inst->x64.alive && !BOX64ENV(dynarec_test)) ? inst->rsp_class : RSP_CLASS_BARRIER;
+        if (pending && (class == RSP_CLASS_BARRIER || (i == 0) || (inst->pred_sz != 1) || (inst->pred[0] != i - 1))) {
+            dyn->insts[last_pushpop].rsp_flush = pending;
+            pending = 0;
+            last_pushpop = -1;
+        }
+        switch (class) {
+            case RSP_CLASS_PUSH:
+                if (pending - (inst->rsp_span ? inst->rsp_span : delta) < -2048) {
+                    dyn->insts[last_pushpop].rsp_flush = pending;
+                    pending = 0;
+                }
+                inst->rsp_entry = pending;
+                inst->rsp_merge = 1;
+                pending -= (inst->rsp_span ? inst->rsp_span : delta);
+                last_pushpop = i;
+                break;
+            case RSP_CLASS_POP:
+                if (pending + (inst->rsp_span ? inst->rsp_span : delta) > 2047) {
+                    dyn->insts[last_pushpop].rsp_flush = pending;
+                    pending = 0;
+                }
+                inst->rsp_entry = pending;
+                inst->rsp_merge = 1;
+                pending += (inst->rsp_span ? inst->rsp_span : delta);
+                last_pushpop = i;
+                break;
+            default:
+                break;
+        }
+    }
+    if (pending) dyn->insts[last_pushpop].rsp_flush = pending;
 }

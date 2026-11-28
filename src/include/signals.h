@@ -6,6 +6,10 @@
 #include "x64_signals.h"
 #include "box64context.h"
 
+#ifndef __SI_SIGFAULT_ADDL
+#define __SI_SIGFAULT_ADDL
+#endif
+
 typedef void (*sighandler_t)(int);
 
 #ifdef ANDROID
@@ -61,6 +65,8 @@ typedef struct __attribute__((packed)) i386_sigaction_restorer_s {
 	sigset_t sa_mask;
 } i386_sigaction_restorer_t;
 
+int my32_syscall_rt_sigaction(x64emu_t* emu, int signum, const i386_sigaction_restorer_t *act, i386_sigaction_restorer_t *oldact, int sigsetsize);
+
 #endif
 
 sighandler_t my_signal(x64emu_t* emu, int signum, sighandler_t handler);
@@ -76,6 +82,17 @@ void enter_critical_section();
 void leave_critical_section();
 int defer_signal(x64emu_t* emu, int signum, siginfo_t* info);
 void cancel_deferred_signal_processing(x64emu_t* emu);
+
+/* What my_sigactionhandler_oldcode_64 reports to my_sigactionhandler_oldcode() about the
+ * interrupted state, so that the latter knows whether it may still restore the register snapshot
+ * it took before dispatching the handler:
+ *   0               -> restore the snapshot (no emulated sigreturn happened)
+ *   1               -> nothing to restore, the callee already put every register back where it
+ *                      belongs (SIG_IGN shortcut, dynablock mirror route)
+ *   SIGCTX_APPLIED  -> the callee wrote the guest frame context (ucontext) back into the emu,
+ *                      handler edits included; the caller must only restore the scratch state a
+ *                      guest ucontext cannot express (df/op1/op2/res, segs_offs) */
+#define SIGCTX_APPLIED 2
 
 void init_signal_helper(box64context_t* context);
 void fini_signal_helper(void);

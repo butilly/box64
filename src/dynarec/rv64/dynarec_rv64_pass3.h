@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #define INIT
+#define ENDPREFIX dyn->insts[ninst].size2 = 0
 #define FINI                                                                                                \
     if (ninst)                                                                                              \
         addInst(dyn->instsize, &dyn->insts_size, dyn->insts[ninst-1].x64.size, dyn->insts[ninst-1].size/4); \
@@ -18,20 +19,13 @@
         if (dyn->need_dump && dyn->need_dump != 3) dynarec_log(LOG_NONE, __VA_ARGS__); \
     } while (0)
 #define NEW_INST                                                                                                  \
-    dyn->vector_sew = dyn->insts[ninst].vector_sew_entry;                                                         \
-    dyn->inst_sew = dyn->vector_sew;                                                                              \
-    dyn->inst_vlmul = VECTOR_LMUL1;                                                                               \
-    dyn->inst_vl = 0;                                                                                             \
+    dyn->rvv = dyn->insts[ninst].rvv_entry;                                                                       \
     if (ninst) {                                                                                                  \
         addInst(dyn->instsize, &dyn->insts_size, dyn->insts[ninst - 1].x64.size, dyn->insts[ninst - 1].size / 4); \
-        dyn->insts[ninst].ymm0_pass3 = dyn->ymm_zero;                                                             \
     }                                                                                                             \
     AREFLAGSNEEDED()
-#define INST_EPILOG                                      \
-    dyn->vector_sew = dyn->insts[ninst].vector_sew_exit; \
-    dyn->inst_sew = dyn->vector_sew;                     \
-    dyn->inst_vlmul = VECTOR_LMUL1;                      \
-    dyn->inst_vl = 0;
+#define INST_EPILOG \
+    assert(dyn->rvv.bits == dyn->insts[ninst].rvv_exit.bits);
 #define INST_NAME(name) inst_name_pass3(dyn, ninst, name, rex)
 
 #define TABLE64(A, V)                                 \

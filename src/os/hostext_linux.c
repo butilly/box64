@@ -15,7 +15,7 @@
 #include <asm/cputable.h>
 #endif
 
-#ifdef RV64
+#if defined(RV64) && defined(DYNAREC)
 #include <setjmp.h>
 #include <signal.h>
 #include <sys/mman.h>
@@ -133,6 +133,13 @@ void rv64Detect(void)
     cpuext.zicond = Check(my_block);
 
     block = (uint32_t*)my_block;
+    FMVWX(0, xZR);
+    FROUNDS(0, 0, RD_RNE, 0);
+    ADDI(A0, xZR, 42);
+    BR(xRA);
+    cpuext.zfa = Check(my_block);
+
+    block = (uint32_t*)my_block;
     CSRRS(xZR, xZR, 0xc22 /* vlenb */);
     ADDI(A0, xZR, 42);
     BR(xRA);
@@ -173,10 +180,17 @@ void rv64Detect(void)
 
         block = (uint32_t*)my_block;
         VSETIVLI(x5, 4, (VECTOR_SEW32 << 3) | VECTOR_LMUL1); // vsetivli x5, 4, e32, m1
-        VROR_VI(3, 4, 1, 1);                                 // vror.vi v3, v4, 1
+        VWSLL_VI(2, 4, 1, VECTOR_UNMASKED);
         ADDI(A0, xZR, 42);
         BR(xRA);
         cpuext.zvbb = Check(my_block);
+
+        block = (uint32_t*)my_block;
+        VSETIVLI(xZR, 2, (VECTOR_SEW64 << 3) | VECTOR_LMUL1);
+        VCLMUL_VV(3, 4, 5, VECTOR_UNMASKED);
+        ADDI(A0, xZR, 42);
+        BR(xRA);
+        cpuext.zvbc = Check(my_block);
 
         block = (uint32_t*)my_block;
         VSETIVLI(x5, 4, (VECTOR_SEW16 << 3) | VECTOR_LMUL1); // vsetivli x5, 4, e16, m1
@@ -228,6 +242,14 @@ int DetectHostCpuFeatures(void)
         if(hwcap&HWCAP_FLAGM)
             cpuext.flagm = 1;
         #endif
+        #ifdef HWCAP_LRCPC
+        if(hwcap&HWCAP_LRCPC)
+            cpuext.lrcpc = 1;
+        #endif
+        #ifdef HWCAP_ILRCPC
+        if(hwcap&HWCAP_ILRCPC)
+            cpuext.lrcpc2 = 1;
+        #endif
         unsigned long hwcap2 = real_getauxval(AT_HWCAP2);
         #ifdef HWCAP2_FLAGM2
         if(hwcap2&HWCAP2_FLAGM2)
@@ -245,6 +267,10 @@ int DetectHostCpuFeatures(void)
         if(hwcap2&HWCAP2_RNG)
             cpuext.rndr = 1;
         #endif
+        #ifdef HWCAP2_LRCPC3
+        if(hwcap2&HWCAP2_LRCPC3)
+            cpuext.lrcpc3 = 1;
+        #endif
         if (p) {
             p = strtok(p, ",");
             while (p) {
@@ -256,10 +282,13 @@ int DetectHostCpuFeatures(void)
                 if (!strcasecmp(p, "sha2")) cpuext.sha2 = 0;
                 if (!strcasecmp(p, "uscat")) cpuext.uscat = 0;
                 if (!strcasecmp(p, "flagm")) cpuext.flagm = 0;
+                if (!strcasecmp(p, "lrcpc")) cpuext.lrcpc = 0;
+                if (!strcasecmp(p, "lrcpc2")) cpuext.lrcpc2 = 0;
                 if (!strcasecmp(p, "flagm2")) cpuext.flagm2 = 0;
                 if (!strcasecmp(p, "frintts")) cpuext.frintts = 0;
                 if (!strcasecmp(p, "afp")) cpuext.afp = 0;
                 if (!strcasecmp(p, "rndr")) cpuext.rndr = 0;
+                if (!strcasecmp(p, "lrcpc3")) cpuext.lrcpc3 = 0;
                 p = strtok(NULL, ",");
             }
         }
@@ -299,6 +328,7 @@ int DetectHostCpuFeatures(void)
                 if (!strcasecmp(p, "zbb")) cpuext.zbb = 0;
                 if (!strcasecmp(p, "zbc")) cpuext.zbc = 0;
                 if (!strcasecmp(p, "zbs")) cpuext.zbs = 0;
+                if (!strcasecmp(p, "zfa")) cpuext.zfa = 0;
                 if (!strcasecmp(p, "vector")) {
                     cpuext.vector = 0;
                     cpuext.xtheadvector = 0;
@@ -318,9 +348,19 @@ int DetectHostCpuFeatures(void)
                     cpuext.zvknhb = 0;
                 }
                 if (!strcasecmp(p, "zvbb")) cpuext.zvbb = 0;
+                if (!strcasecmp(p, "zvbc")) cpuext.zvbc = 0;
                 if (!strcasecmp(p, "zvfh")) cpuext.zvfh = 0;
                 p = strtok(NULL, ",");
             }
+        }
+        if (!cpuext.vector) {
+            cpuext.vlen = 0;
+            cpuext.zvkned = 0;
+            cpuext.zvknha = 0;
+            cpuext.zvknhb = 0;
+            cpuext.zvbb = 0;
+            cpuext.zvbc = 0;
+            cpuext.zvfh = 0;
         }
     }
 #elif defined(PPC64LE)

@@ -22,6 +22,10 @@ void PrintHostCpuFeatures(void)
         printf_log_prefix(0, LOG_INFO, " USCAT");
     if(cpuext.flagm)
         printf_log_prefix(0, LOG_INFO, " FLAGM");
+    if(cpuext.lrcpc)
+        printf_log_prefix(0, LOG_INFO, " LRCPC");
+    if(cpuext.lrcpc2)
+        printf_log_prefix(0, LOG_INFO, " LRCPC2");
     if(cpuext.flagm2)
         printf_log_prefix(0, LOG_INFO, " FLAGM2");
     if(cpuext.frintts)
@@ -30,6 +34,8 @@ void PrintHostCpuFeatures(void)
         printf_log_prefix(0, LOG_INFO, " AFP");
     if(cpuext.rndr)
         printf_log_prefix(0, LOG_INFO, " RNDR");
+    if(cpuext.lrcpc3)
+        printf_log_prefix(0, LOG_INFO, " LRCPC3");
     printf_log_prefix(0, LOG_INFO, "\n");
 #elif defined(LA64)
     printf_log(LOG_INFO, "Dynarec for LoongArch with extension LSX");
@@ -53,6 +59,7 @@ void PrintHostCpuFeatures(void)
     if (cpuext.zbb) printf_log_prefix(0, LOG_INFO, "_zbb");
     if (cpuext.zbc) printf_log_prefix(0, LOG_INFO, "_zbc");
     if (cpuext.zbs) printf_log_prefix(0, LOG_INFO, "_zbs");
+    if (cpuext.zfa) printf_log_prefix(0, LOG_INFO, "_zfa");
     if (cpuext.zicbom) printf_log_prefix(0, LOG_INFO, "_zicbom");
     if (cpuext.zicbop) printf_log_prefix(0, LOG_INFO, "_zicbop");
     if (cpuext.zicond) printf_log_prefix(0, LOG_INFO, "_zicond");
@@ -72,6 +79,7 @@ void PrintHostCpuFeatures(void)
     if (cpuext.zvknha) printf_log_prefix(0, LOG_INFO, "_zvknha");
     if (cpuext.zvknhb) printf_log_prefix(0, LOG_INFO, "_zvknhb");
     if (cpuext.zvbb) printf_log_prefix(0, LOG_INFO, "_zvbb");
+    if (cpuext.zvbc) printf_log_prefix(0, LOG_INFO, "_zvbc");
     if (cpuext.zvfh) printf_log_prefix(0, LOG_INFO, "_zvfh");
     printf_log_prefix(0, LOG_INFO, "\n");
 #elif defined(PPC64LE)

@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-#define _GNU_SOURCE
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -13,7 +12,8 @@
 #include <setjmp.h>
 #include <sys/mman.h>
 #include <pthread.h>
-#ifndef ANDROID
+#include <signal.h>
+#ifdef USE_BACKTRACE
 #include <execinfo.h>
 #endif
 
@@ -33,29 +33,11 @@
 #include "emu/x87emu_private.h"
 #include "custommem.h"
 #include "bridge.h"
+#include "sigtools.h"
 #ifdef DYNAREC
 #include "dynablock.h"
 #include "../dynarec/dynablock_private.h"
 #include "dynarec_native.h"
-#if defined(ARM64)
-#include "dynarec/arm64/arm64_mapping.h"
-#define CONTEXT_REG(P, X)   P->uc_mcontext.regs[X]
-#define CONTEXT_PC(P)       P->uc_mcontext.pc
-#elif defined(LA64)
-#include "dynarec/la64/la64_mapping.h"
-#define CONTEXT_REG(P, X)   P->uc_mcontext.__gregs[X]
-#define CONTEXT_PC(P)       P->uc_mcontext.__pc;
-#elif defined(RV64)
-#include "dynarec/rv64/rv64_mapping.h"
-#define CONTEXT_REG(P, X)   P->uc_mcontext.__gregs[X]
-#define CONTEXT_PC(P)       P->uc_mcontext.__gregs[REG_PC]
-#elif defined(PPC64LE)
-#include "dynarec/ppc64le/ppc64le_mapping.h"
-#define CONTEXT_REG(P, X)   P->uc_mcontext.gp_regs[X]
-#define CONTEXT_PC(P)       P->uc_mcontext.gp_regs[PT_NIP]
-#else
-#error Unsupported Architecture
-#endif //arch
 #endif
 
 
@@ -288,8 +270,8 @@ typedef struct __attribute__((packed, aligned(4))) my_siginfo32_s
     union {
 	    int _pad[128/sizeof(int)-3];
 	struct {
-	    __pid_t __si_pid;
-	    __uid_t __si_uid;
+	    pid_t __si_pid;
+	    uid_t __si_uid;
     } _kill;
 	struct {
 	    int si_tid;
@@ -297,13 +279,13 @@ typedef struct __attribute__((packed, aligned(4))) my_siginfo32_s
 	    my_sigval32_t si_sigval;
     } _timer;
 	struct {
-	    __pid_t __si_pid;
-	    __uid_t __si_uid;
+	    pid_t __si_pid;
+	    uid_t __si_uid;
 	    my_sigval32_t si_sigval;
     } _rt;
 	struct {
-	    __pid_t __si_pid;
-	    __uid_t __si_uid;
+	    pid_t __si_pid;
+	    uid_t __si_uid;
 	    int __si_status;
 	    int32_t __si_utime;
 	    int32_t __si_stime;
@@ -469,7 +451,7 @@ void convert_siginfo_to_32(void* d, void* s, int sig)
     dst->si_signo = src->si_signo;
     dst->si_errno = src->si_errno;
     dst->si_code = src->si_code;
-    memcpy(&dst->_sifields, &src->_sifields, sizeof(siginfo_t) - offsetof(siginfo_t, _sifields));
+    memcpy(&dst->_sifields, &src->SIGINFO_S_SIFIELDS, sizeof(siginfo_t) - offsetof(siginfo_t, SIGINFO_S_SIFIELDS));
     if(sig==X64_SIGILL || sig==X64_SIGFPE || sig==X64_SIGSEGV || sig==X64_SIGBUS)
         dst->_sifields._sigfault.__si_addr = to_ptr(((uintptr_t)src->si_addr)&0xffffffff);  // in case addr is not a 32bits value...
     if(sig==X64_SIGCHLD) {
@@ -485,7 +467,6 @@ void convert_siginfo_to_32(void* d, void* s, int sig)
 void relockMutex(int locks);
 int unlockMutex();
 
-int write_opcode(uintptr_t rip, uintptr_t native_ip, int is32bits);
 #define is_memprot_locked (1<<1)
 #define is_dyndump_locked (1<<8)
 int my_sigactionhandler_oldcode_32(x64emu_t* emu, int32_t sig, int simple, siginfo_t* info, void * ucntx, int* old_code, void* cur_db)
@@ -541,6 +522,18 @@ int my_sigactionhandler_oldcode_32(x64emu_t* emu, int32_t sig, int simple, sigin
     // try to fill some sigcontext....
     frame -= sizeof(i386_ucontext_t);
     i386_ucontext_t   *sigcontext = (i386_ucontext_t*)frame;
+    const size_t sigmask_sz = (sizeof(sigset_t)<=sizeof(i386_sigset_t))?sizeof(sigset_t):sizeof(i386_sigset_t);
+    if(ucntx)
+        memcpy(&sigcontext->uc_sigmask, &((ucontext_t *)ucntx)->uc_sigmask, sigmask_sz);
+    else {
+        if(sizeof(sigset_t)==sizeof(i386_sigset_t))
+            sigprocmask(SIG_SETMASK, NULL, (sigset_t*)&sigcontext->uc_sigmask);
+        else {
+            sigset_t tmp = {0};
+            sigprocmask(SIG_SETMASK, NULL, &tmp);
+            memcpy(&sigcontext->uc_sigmask, &tmp, sigmask_sz);
+        }
+    }
     // get general register
     sigcontext->uc_mcontext.gregs[I386_EAX] = R_EAX;
     sigcontext->uc_mcontext.gregs[I386_ECX] = R_ECX;
@@ -566,6 +559,12 @@ int my_sigactionhandler_oldcode_32(x64emu_t* emu, int32_t sig, int simple, sigin
     fpu_xsave_mask(emu, xstate, 1, 0b111);
     memcpy(&sigcontext->xstate, xstate, sizeof(sigcontext->xstate));
     ((struct i386_fpstate*)xstate)->status_magic = 0x46505853;   // magic number to signal an XSTATE type of fpregs
+    reset_fpu(emu);
+    for (int i = 0; i < 16; ++i) {
+        getXMM(emu, i)->u128 = 0;
+        getYMM(emu, i)->u128 = 0;
+    }
+    emu->mxcsr.x32 = 0x1f80;
     // get signal mask
 
     if(new_ss) {
@@ -638,7 +637,7 @@ int my_sigactionhandler_oldcode_32(x64emu_t* emu, int32_t sig, int simple, sigin
         } else {
             sigcontext->uc_mcontext.gregs[I386_TRAPNO] = 14;
             sigcontext->uc_mcontext.gregs[I386_ERR] = 4|((sysmapped && !(real_prot&PROT_READ))?0:1);
-            if(write_opcode(sigcontext->uc_mcontext.gregs[I386_EIP], (uintptr_t)pc, 1))
+            if(write_opcode(sigcontext->uc_mcontext.gregs[I386_EIP], (uintptr_t)pc, 1, ucntx))
                 sigcontext->uc_mcontext.gregs[I386_ERR] |= 2;
         }
         if(info->si_code == SEGV_ACCERR && old_code)
@@ -742,6 +741,7 @@ int my_sigactionhandler_oldcode_32(x64emu_t* emu, int32_t sig, int simple, sigin
     #undef GO
 
     if(memcmp(sigcontext, &sigcontext_copy, sizeof(i386_ucontext_t))) {
+        fpu_xrstor_mask(emu, xstate, 1, 0b111);
         if(emu->jmpbuf) {
             #define GO(R)   emu->regs[_##R].q[0]=sigcontext->uc_mcontext.gregs[I386_E##R]
             GO(AX);
@@ -785,14 +785,36 @@ int my_sigactionhandler_oldcode_32(x64emu_t* emu, int32_t sig, int simple, sigin
             dynablock_leave_runtime((dynablock_t*)cur_db);
             #endif
             cancel_deferred_signal_processing(emu);
+            #ifndef __GLIBC__
+            // cannot inject sigmask in jumpbuf, as the data is private and format/offset varies with libc and architecture
+            sigset_t tmp = {0};
+            memcpy(&tmp, &sigcontext->uc_sigmask, sigmask_sz);
+            sigprocmask(SIG_SETMASK, &tmp, NULL);
             #ifdef ANDROID
-            siglongjmp(*emu->jmpbuf, skip);
+            longjmp(*emu->jmpbuf, skip);
             #else
-            siglongjmp(emu->jmpbuf, skip);
+            longjmp(emu->jmpbuf, skip);
+            #endif
+            #else
+            memcpy(&emu->jmpbuf->__saved_mask, &sigcontext->uc_sigmask, sigmask_sz);
+            emu->jmpbuf->__mask_was_saved = 1;
+            longjmp(emu->jmpbuf, skip);
             #endif
         }
         printf_log(LOG_INFO, "Warning, context has been changed in Sigactionhanlder%s\n", (sigcontext->uc_mcontext.gregs[I386_EIP]!=sigcontext_copy.uc_mcontext.gregs[I386_EIP])?" (EIP changed)":"");
+        if(ucntx)
+            memcpy(&((ucontext_t*)ucntx)->uc_sigmask, &sigcontext->uc_sigmask, sigmask_sz);
+        else {
+            if(sizeof(sigset_t)==sizeof(i386_sigset_t))
+                sigprocmask(SIG_SETMASK, (sigset_t*)&sigcontext->uc_sigmask, NULL);
+            else {
+                sigset_t tmp = {0};
+                memcpy(&tmp, &sigcontext->uc_sigmask, sigmask_sz);
+                sigprocmask(SIG_SETMASK, &tmp, NULL);
+            }
+        }
     }
+    fpu_xrstor_mask(emu, xstate, 1, 0b111);
     // restore regs...
     #define GO(R)   R_##R=sigcontext->uc_mcontext.gregs[I386_##R]
     GO(EAX);
@@ -936,6 +958,30 @@ EXPORT int my32_sigaction(x64emu_t* emu, int signum, const i386_sigaction_t *act
 }
 EXPORT int my32___sigaction(x64emu_t* emu, int signum, const i386_sigaction_t *act, i386_sigaction_t *oldact)
 __attribute__((alias("my32_sigaction")));
+
+EXPORT int my32_syscall_rt_sigaction(x64emu_t* emu, int signum, const i386_sigaction_restorer_t *act, i386_sigaction_restorer_t *oldact, int sigsetsize)
+{
+    if(signum < 0 || signum > MAX_SIGNAL || sigsetsize != 8) {
+        errno = EINVAL;
+        return -1;
+    }
+    i386_sigaction_t kact, kold;
+    if(act) {
+        memset(&kact, 0, sizeof(kact));
+        kact._u._sa_handler = act->_u._sa_handler;
+        kact.sa_flags = act->sa_flags;
+        kact.sa_restorer = act->sa_restorer;
+        memcpy(&kact.sa_mask, &act->sa_mask, sigsetsize);
+    }
+    int ret = my32_sigaction(emu, signum, act?&kact:NULL, oldact?&kold:NULL);
+    if(oldact && ret==0) {
+        oldact->_u._sa_handler = kold._u._sa_handler;
+        oldact->sa_flags = kold.sa_flags;
+        oldact->sa_restorer = kold.sa_restorer;
+        memcpy(&oldact->sa_mask, &kold.sa_mask, sigsetsize);
+    }
+    return ret;
+}
 
 EXPORT int my32_getcontext(x64emu_t* emu, void* ucp)
 {

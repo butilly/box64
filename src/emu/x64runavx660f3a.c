@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-#define _GNU_SOURCE
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -191,7 +190,7 @@ uintptr_t RunAVX_660F3A(x64emu_t *emu, vex_t vex, uintptr_t addr, int *step)
                     fesetround(FE_TONEAREST);
                     for(int i=0; i<4; ++i)
                         #ifdef RV64
-                        if(isnanf(EX->f[i]))
+                        if(isnan(EX->f[i]))
                             GX->ud[i] = EX->ud[i] | 0x00400000;
                         else
                         #endif
@@ -202,7 +201,7 @@ uintptr_t RunAVX_660F3A(x64emu_t *emu, vex_t vex, uintptr_t addr, int *step)
                 case ROUND_Down:
                     for(int i=0; i<4; ++i)
                         #ifdef RV64
-                        if(isnanf(EX->f[i]))
+                        if(isnan(EX->f[i]))
                             GX->ud[i] = EX->ud[i] | 0x00400000;
                         else
                         #endif
@@ -211,7 +210,7 @@ uintptr_t RunAVX_660F3A(x64emu_t *emu, vex_t vex, uintptr_t addr, int *step)
                 case ROUND_Up:
                     for(int i=0; i<4; ++i)
                         #ifdef RV64
-                        if(isnanf(EX->f[i]))
+                        if(isnan(EX->f[i]))
                             GX->ud[i] = EX->ud[i] | 0x00400000;
                         else
                         #endif
@@ -220,7 +219,7 @@ uintptr_t RunAVX_660F3A(x64emu_t *emu, vex_t vex, uintptr_t addr, int *step)
                 case ROUND_Chop:
                     for(int i=0; i<4; ++i)
                         #ifdef RV64
-                        if(isnanf(EX->f[i]))
+                        if(isnan(EX->f[i]))
                             GX->ud[i] = EX->ud[i] | 0x00400000;
                         else
                         #endif
@@ -235,7 +234,7 @@ uintptr_t RunAVX_660F3A(x64emu_t *emu, vex_t vex, uintptr_t addr, int *step)
                         fesetround(FE_TONEAREST);
                         for(int i=0; i<4; ++i)
                             #ifdef RV64
-                            if(isnanf(EY->f[i]))
+                            if(isnan(EY->f[i]))
                                 GY->ud[i] = EY->ud[i] | 0x00400000;
                             else
                             #endif
@@ -246,7 +245,7 @@ uintptr_t RunAVX_660F3A(x64emu_t *emu, vex_t vex, uintptr_t addr, int *step)
                     case ROUND_Down:
                         for(int i=0; i<4; ++i)
                             #ifdef RV64
-                            if(isnanf(EY->f[i]))
+                            if(isnan(EY->f[i]))
                                 GY->ud[i] = EY->ud[i] | 0x00400000;
                             else
                             #endif
@@ -255,7 +254,7 @@ uintptr_t RunAVX_660F3A(x64emu_t *emu, vex_t vex, uintptr_t addr, int *step)
                     case ROUND_Up:
                         for(int i=0; i<4; ++i)
                             #ifdef RV64
-                            if(isnanf(EY->f[i]))
+                            if(isnan(EY->f[i]))
                                 GY->ud[i] = EY->ud[i] | 0x00400000;
                             else
                             #endif
@@ -264,7 +263,7 @@ uintptr_t RunAVX_660F3A(x64emu_t *emu, vex_t vex, uintptr_t addr, int *step)
                     case ROUND_Chop:
                         for(int i=0; i<4; ++i)
                             #ifdef RV64
-                            if(isnanf(EY->f[i]))
+                            if(isnan(EY->f[i]))
                                 GY->ud[i] = EY->ud[i] | 0x00400000;
                             else
                             #endif
@@ -378,7 +377,7 @@ uintptr_t RunAVX_660F3A(x64emu_t *emu, vex_t vex, uintptr_t addr, int *step)
             GETGX; GETVX; GETGY;
             tmp8u = F8; // ignoring bit 3 interupt thingy
             #ifdef RV64
-            if(isnanf(EX->f[0])) {
+            if(isnan(EX->f[0])) {
                 GX->ud[0] = EX->ud[0] | 0x00400000;
             } else
             #endif
@@ -870,12 +869,12 @@ uintptr_t RunAVX_660F3A(x64emu_t *emu, vex_t vex, uintptr_t addr, int *step)
             GETGY;
             tmp8u = (F8)>>4;
             for(int i=0; i<4; ++i)
-                GX->ud[i] = (emu->xmm[tmp8u].ud[i]>>31)?EX->ud[i]:VX->ud[i];
+                GX->ud[i] = (getXMM(emu, tmp8u)->ud[i]>>31)?EX->ud[i]:VX->ud[i];
             if(vex.l) {
                 GETEY;
                 GETVY;
                 for(int i=0; i<4; ++i)
-                    GY->ud[i] = (emu->ymm[tmp8u].ud[i]>>31)?EY->ud[i]:VY->ud[i];
+                    GY->ud[i] = (getYMM(emu, tmp8u)->ud[i]>>31)?EY->ud[i]:VY->ud[i];
             } else
                 GY->u128 = 0;
             break;
@@ -887,12 +886,12 @@ uintptr_t RunAVX_660F3A(x64emu_t *emu, vex_t vex, uintptr_t addr, int *step)
             GETGY;
             tmp8u = (F8)>>4;
             for(int i=0; i<2; ++i)
-                GX->q[i] = (emu->xmm[tmp8u].q[i]>>63)?EX->q[i]:VX->q[i];
+                GX->q[i] = (getXMM(emu, tmp8u)->q[i]>>63)?EX->q[i]:VX->q[i];
             if(vex.l) {
                 GETEY;
                 GETVY;
                 for(int i=0; i<2; ++i)
-                    GY->q[i] = (emu->ymm[tmp8u].q[i]>>63)?EY->q[i]:VY->q[i];
+                    GY->q[i] = (getYMM(emu, tmp8u)->q[i]>>63)?EY->q[i]:VY->q[i];
             } else
                 GY->u128 = 0;
             break;
@@ -907,12 +906,12 @@ uintptr_t RunAVX_660F3A(x64emu_t *emu, vex_t vex, uintptr_t addr, int *step)
             if(rex.is32bits)
                 tmp8u&=7;
             for(int i=0; i<16; ++i)
-                GX->ub[i] = (emu->xmm[tmp8u].ub[i]&0x80)?EX->ub[i]:VX->ub[i];
+                GX->ub[i] = (getXMM(emu, tmp8u)->ub[i]&0x80)?EX->ub[i]:VX->ub[i];
             if(vex.l) {
                 GETEY;
                 GETVY;
                 for(int i=0; i<16; ++i)
-                    GY->ub[i] = (emu->ymm[tmp8u].ub[i]&0x80)?EY->ub[i]:VY->ub[i];
+                    GY->ub[i] = (getYMM(emu, tmp8u)->ub[i]&0x80)?EY->ub[i]:VY->ub[i];
             } else
                 GY->u128 = 0;
             break;
@@ -925,14 +924,14 @@ uintptr_t RunAVX_660F3A(x64emu_t *emu, vex_t vex, uintptr_t addr, int *step)
             tmp32u = sse42_compare_string_explicit_len(emu, EX, R_RDX, GX, R_RAX, tmp8u, vex.rex.w);
             if(tmp8u&0b1000000) {
                 switch(tmp8u&1) {
-                    case 0: for(int i=0; i<16; ++i) emu->xmm[0].ub[i] = ((tmp32u>>i)&1)?0xff:0x00; break;
-                    case 1: for(int i=0; i<8; ++i) emu->xmm[0].uw[i] = ((tmp32u>>i)&1)?0xffff:0x0000; break;
+                    case 0: for(int i=0; i<16; ++i) getXMM(emu, 0)->ub[i] = ((tmp32u>>i)&1)?0xff:0x00; break;
+                    case 1: for(int i=0; i<8; ++i) getXMM(emu, 0)->uw[i] = ((tmp32u>>i)&1)?0xffff:0x0000; break;
                 }
             } else {
-                emu->xmm[0].q[1] = emu->xmm[0].q[0] = 0;
-                emu->xmm[0].uw[0] = tmp32u;
+                getXMM(emu, 0)->q[1] = getXMM(emu, 0)->q[0] = 0;
+                getXMM(emu, 0)->uw[0] = tmp32u;
             }
-            emu->ymm[0].u128 = 0;
+            getYMM(emu, 0)->u128 = 0;
             break;
         case 0x61:  /* VPCMPESTRI */
             nextop = F8;
@@ -955,14 +954,14 @@ uintptr_t RunAVX_660F3A(x64emu_t *emu, vex_t vex, uintptr_t addr, int *step)
             tmp32u = sse42_compare_string_implicit_len(emu, EX, GX, tmp8u);
             if(tmp8u&0b1000000) {
                 switch(tmp8u&1) {
-                    case 0: for(int i=0; i<16; ++i) emu->xmm[0].ub[i] = ((tmp32u>>i)&1)?0xff:0x00; break;
-                    case 1: for(int i=0; i<8; ++i) emu->xmm[0].uw[i] = ((tmp32u>>i)&1)?0xffff:0x0000; break;
+                    case 0: for(int i=0; i<16; ++i) getXMM(emu, 0)->ub[i] = ((tmp32u>>i)&1)?0xff:0x00; break;
+                    case 1: for(int i=0; i<8; ++i) getXMM(emu, 0)->uw[i] = ((tmp32u>>i)&1)?0xffff:0x0000; break;
                 }
             } else {
-                emu->xmm[0].q[1] = emu->xmm[0].q[0] = 0;
-                emu->xmm[0].uw[0] = tmp32u;
+                getXMM(emu, 0)->q[1] = getXMM(emu, 0)->q[0] = 0;
+                getXMM(emu, 0)->uw[0] = tmp32u;
             }
-            emu->ymm[0].u128 = 0;
+            getYMM(emu, 0)->u128 = 0;
             break;
         case 0x63:  /* VPCMPISTRI */
             nextop = F8;

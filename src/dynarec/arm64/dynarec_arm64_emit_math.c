@@ -85,10 +85,10 @@ void emit_add32c(dynarec_arm_t* dyn, int ninst, rex_t rex, int s1, int64_t c, in
     if((s1==xRSP) && (BOX64DRENV(dynarec_safeflags)<2) && (!dyn->insts || (dyn->insts[ninst].x64.gen_flags==X_PEND) || (!BOX64ENV(dynarec_df) && (dyn->insts[ninst].x64.gen_flags==X_ALL)))) {
         // special case when doing math on ESP and only PEND is needed: ignoring it!
         if(c>=0 && c<0x1000) {
-            ADDx_U12(s1, s1, c);
+            ADDxw_U12(s1, s1, c);
         } else {
             MOV64x(s3, c);
-            ADDx_REG(s1, s1, s3);
+            ADDxw_REG(s1, s1, s3);
         }
         return;
     }
@@ -1001,9 +1001,13 @@ void emit_adc32(dynarec_arm_t* dyn, int ninst, rex_t rex, int s1, int s2, int s3
             }
         }
     } else {
-        MRS_nzcv(s3);
-        BFIx(s3, xFlags, 29, 1); // set C
-        MSR_nzcv(s3);      // load CC into ARM CF
+        if(cpuext.flagm)
+            RMIF(xFlags, 63, 0b0010);
+        else {
+            MRS_nzcv(s3);
+            BFIx(s3, xFlags, 29, 1); // set C
+            MSR_nzcv(s3);      // load CC into ARM CF
+        }
     }
     IFX(X_AF) {
         ORRxw_REG(s3, s1, s2);    // s3 = op1 | op2
@@ -1144,9 +1148,13 @@ void emit_adc8(dynarec_arm_t* dyn, int ninst, int s1, int s2, int s3, int s4)
             }
         }
     } else {
-        MRS_nzcv(s3);
-        BFIx(s3, xFlags, 29, 1); // set C
-        MSR_nzcv(s3);      // load CC into ARM CF
+        if(cpuext.flagm)
+            RMIF(xFlags, 63, 0b0010);
+        else {
+            MRS_nzcv(s3);
+            BFIx(s3, xFlags, 29, 1); // set C
+            MSR_nzcv(s3);      // load CC into ARM CF
+        }
     }
     IFX(X_AF | X_OF) {
         ORRw_REG(s3, s1, s2);    // s3 = op1 | op2
@@ -1208,9 +1216,13 @@ void emit_adc16(dynarec_arm_t* dyn, int ninst, int s1, int s2, int s3, int s4)
             }
         }
     } else {
-        MRS_nzcv(s3);
-        BFIx(s3, xFlags, 29, 1); // set C
-        MSR_nzcv(s3);      // load CC into ARM CF
+        if(cpuext.flagm)
+            RMIF(xFlags, 63, 0b0010);
+        else {
+            MRS_nzcv(s3);
+            BFIx(s3, xFlags, 29, 1); // set C
+            MSR_nzcv(s3);      // load CC into ARM CF
+        }
     }
     IFX(X_AF | X_OF) {
         ORRw_REG(s3, s1, s2);    // s3 = op1 | op2
@@ -1332,9 +1344,13 @@ void emit_sbb32(dynarec_arm_t* dyn, int ninst, rex_t rex, int s1, int s2, int s3
         }
     } else {
         EORw_mask(s4, xFlags, 0, 0);        // invert CC because it's reverted for SUB on ARM
-        MRS_nzcv(s3);
-        BFIx(s3, s4, 29, 1); // set C
-        MSR_nzcv(s3);      // load CC into ARM CF
+        if(cpuext.flagm)
+            RMIF(s4, 63, 0b0010);
+        else {
+            MRS_nzcv(s3);
+            BFIx(s3, s4, 29, 1); // set C
+            MSR_nzcv(s3);      // load CC into ARM CF
+        }
     }
     IFX(X_AF) {
         ORNxw_REG(s3, s2, s1);    // s3 = ~op1 | op2
@@ -1481,9 +1497,13 @@ void emit_sbb8(dynarec_arm_t* dyn, int ninst, int s1, int s2, int s3, int s4)
         }
     } else {
         EORw_mask(s4, xFlags, 0, 0);        // invert CC because it's reverted for SUB on ARM
-        MRS_nzcv(s3);
-        BFIx(s3, s4, 29, 1); // set C
-        MSR_nzcv(s3);      // load CC into ARM CF
+        if(cpuext.flagm)
+            RMIF(s4, 63, 0b0010);
+        else {
+            MRS_nzcv(s3);
+            BFIx(s3, s4, 29, 1); // set C
+            MSR_nzcv(s3);      // load CC into ARM CF
+        }
     }
     IFX(X_AF|X_OF|X_CF) {
         ORNw_REG(s3, s2, s1);    // s3 = ~op1 | op2
@@ -1546,9 +1566,13 @@ void emit_sbb16(dynarec_arm_t* dyn, int ninst, int s1, int s2, int s3, int s4)
         }
     } else {
         EORw_mask(s4, xFlags, 0, 0);            // invert CC because it's reverted for SUB on ARM
-        MRS_nzcv(s3);
-        BFIx(s3, s4, 29, 1); // set C, bit 29
-        MSR_nzcv(s3);      // load CC into ARM CF
+        if(cpuext.flagm)
+            RMIF(s4, 63, 0b0010);
+        else {
+            MRS_nzcv(s3);
+            BFIx(s3, s4, 29, 1); // set C, bit 29
+            MSR_nzcv(s3);      // load CC into ARM CF
+        }
     }
     IFX(X_AF|X_OF|X_CF) {
         ORNw_REG(s3, s2, s1);    // s3 = ~op1 | op2

@@ -209,6 +209,7 @@ uintptr_t dynarec64_660F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
                     FRFLAGS(x5); // get back FPSR to check the IOC bit
                     ANDI(x5, x5, (1 << FR_NV) | (1 << FR_OF));
                     BEQ_MARKi(x5, xZR, i);
+                    emit_mxcsr_raise_invalid(x5);
                     MOV32w(x1, 0x80000000);
                     MARKi(i);
                 }
@@ -221,7 +222,6 @@ uintptr_t dynarec64_660F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
             GETGM();
             GETEX(x2, 0, 8);
             d0 = fpu_get_scratch(dyn);
-            u8 = sse_setround(dyn, ninst, x4, x5);
             for (int i = 0; i < 2; ++i) {
                 if (!BOX64ENV(dynarec_fastround)) {
                     FSFLAGSI(0); // // reset all bits
@@ -232,12 +232,12 @@ uintptr_t dynarec64_660F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
                     FRFLAGS(x5); // get back FPSR to check the IOC bit
                     ANDI(x5, x5, (1 << FR_NV) | (1 << FR_OF));
                     BEQ_MARKi(x5, xZR, i);
+                    emit_mxcsr_raise_invalid(x5);
                     MOV32w(x1, 0x80000000);
                     MARKi(i);
                 }
                 SW(x1, gback, gdoffset + i * 4);
             }
-            x87_restoreround(dyn, ninst, u8);
             break;
         case 0x2E:
             // no special check...
@@ -302,7 +302,7 @@ uintptr_t dynarec64_660F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
         ed = x4;                                                                             \
     }                                                                                        \
     B##NO(x1, 4 + 3 * 4);                                                                    \
-    LUI(x3, 0xffff0);                                                                        \
+    MOV64x(x3, 0xFFFFFFFFFFFF0000);                                                          \
     AND(gd, gd, x3);                                                                         \
     OR(gd, gd, ed);
 
@@ -449,7 +449,6 @@ uintptr_t dynarec64_660F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
             GETGX();
             GETEX(x2, 0, 8);
             d0 = fpu_get_scratch(dyn);
-            u8 = sse_setround(dyn, ninst, x6, x4);
             for (int i = 0; i < 2; ++i) {
                 FLD(d0, wback, fixedaddress + i * 8);
                 if (!BOX64ENV(dynarec_fastnan)) {
@@ -464,7 +463,7 @@ uintptr_t dynarec64_660F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
                     SRLI(x3, x3, 29);
                     MOV32w(x5, 0x007fffff);
                     AND(x3, x3, x5);
-                    LUI(x5, 0x7fc00);
+                    MOV32w(x5, 0x7FC00000);
                     OR(x3, x3, x5);
                     OR(x3, x3, x4);
                     FMVWX(d0, x3);
@@ -472,7 +471,6 @@ uintptr_t dynarec64_660F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
                 }
                 FSW(d0, gback, gdoffset + i * 4);
             }
-            x87_restoreround(dyn, ninst, u8);
             // GX->q[1] = 0;
             SD(xZR, gback, gdoffset + 8);
             break;
@@ -482,16 +480,25 @@ uintptr_t dynarec64_660F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
             GETGX();
             GETEX(x2, 0, 12);
             d0 = fpu_get_scratch(dyn);
-            u8 = sse_setround(dyn, ninst, x6, x4);
             for (int i = 0; i < 4; ++i) {
+                if (!BOX64ENV(dynarec_fastround)) FSFLAGSI(0);
                 FLW(d0, wback, fixedaddress + 4 * i);
                 FCVTLS(x3, d0, RD_DYN);
+                if (!BOX64ENV(dynarec_fastround)) {
+                    FRFLAGS(x6);
+                    ANDI(x4, x6, (1 << FR_NV) | (1 << FR_OF));
+                    BEQZ_MARKi(x4, i);
+                    emit_mxcsr_raise_invalid(x4);
+                    MARKi(i);
+                    ANDI(x4, x6, 1 << FR_NX);
+                    BEQZ(x4, 16);
+                    emit_mxcsr_raise_precision(x4);
+                }
                 SEXT_W(x5, x3);
                 BEQ(x5, x3, 8);
-                LUI(x3, 0x80000); // INT32_MIN
+                MOV64x(x3, (int64_t)INT32_MIN);
                 SW(x3, gback, gdoffset + 4 * i);
             }
-            x87_restoreround(dyn, ninst, u8);
             break;
         case 0x5C:
             INST_NAME("SUBPD Gx, Ex");
@@ -534,10 +541,6 @@ uintptr_t dynarec64_660F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
             for (int i = 0; i < 2; ++i) {
                 FLD(d0, gback, gdoffset + 8 * i);
                 FLD(d1, wback, fixedaddress + 8 * i);
-                FEQD(x3, d0, d0);
-                FEQD(x4, d1, d1);
-                AND(x3, x3, x4);
-                BEQ(x3, xZR, 12);
                 FLTD(x3, d0, d1);
                 BNE(x3, xZR, 8); // continue
                 FSD(d1, gback, gdoffset + 8 * i);
@@ -584,12 +587,8 @@ uintptr_t dynarec64_660F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
             for (int i = 0; i < 2; ++i) {
                 FLD(d0, gback, gdoffset + 8 * i);
                 FLD(d1, wback, fixedaddress + 8 * i);
-                FEQD(x3, d0, d0);
-                FEQD(x4, d1, d1);
-                AND(x3, x3, x4);
-                BEQ(x3, xZR, 12);
-                FLED(x3, d0, d1);
-                BEQ(x3, xZR, 8); // continue
+                FLTD(x3, d1, d0);
+                BNE(x3, xZR, 8); // continue
                 FSD(d1, gback, gdoffset + 8 * i);
             }
             break;
@@ -770,7 +769,7 @@ uintptr_t dynarec64_660F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
                     SB(x3, gback, gdoffset + 2 * i + 1);
                 }
             } else {
-                GETEX(x2, 0, 7);
+                GETEX(x2, 0, 15);
                 for (int i = 0; i < 8; ++i) {
                     // GX->ub[2 * i + 1] = EX->ub[i + 8];
                     LBU(x3, wback, fixedaddress + i + 8);
@@ -853,7 +852,7 @@ uintptr_t dynarec64_660F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
             nextop = F8;
             GETGX();
             if (MODREG) {
-                v1 = sse_get_reg(dyn, ninst, x2, (nextop & 7) + (rex.b << 3), 0);
+                v1 = simd_get_fp_reg(dyn, ninst, x2, (nextop & 7) + (rex.b << 3), 0);
                 FSD(v1, gback, gdoffset + 8);
             } else {
                 addr = geted(dyn, addr, ninst, nextop, &ed, x2, x3, &fixedaddress, rex, NULL, 1, 0);
@@ -884,9 +883,9 @@ uintptr_t dynarec64_660F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
                 FMVDX(v0, ed);
             } else {
                 FMVWX(v0, ed);
-                SW(xZR, xEmu, offsetof(x64emu_t, xmm[gd]) + 4);
+                SW(xZR, xEmu, XMMOFF(gd) + 4);
             }
-            SD(xZR, xEmu, offsetof(x64emu_t, xmm[gd]) + 8);
+            SD(xZR, xEmu, XMMOFF(gd) + 8);
             break;
         case 0x6F:
             INST_NAME("MOVDQA Gx,Ex");
@@ -1281,6 +1280,7 @@ uintptr_t dynarec64_660F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
             if (rex.w) {
                 if (MODREG) {
                     ed = TO_NAT((nextop & 7) + (rex.b << 3));
+                    MARKREGd(ed);
                     LD(ed, gback, gdoffset + 0);
                 } else {
                     addr = geted(dyn, addr, ninst, nextop, &ed, x2, x3, &fixedaddress, rex, NULL, 1, 0);
@@ -1291,6 +1291,7 @@ uintptr_t dynarec64_660F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
             } else {
                 if (MODREG) {
                     ed = TO_NAT((nextop & 7) + (rex.b << 3));
+                    MARKREGd(ed);
                     LWU(ed, gback, gdoffset + 0);
                 } else {
                     addr = geted(dyn, addr, ninst, nextop, &ed, x2, x3, &fixedaddress, rex, NULL, 1, 0);
@@ -1584,7 +1585,7 @@ uintptr_t dynarec64_660F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
                 addr = geted(dyn, addr, ninst, nextop, &ed, x2, x4, &fixedaddress, rex, NULL, 1, 0);
                 LBU(x1, ed, fixedaddress);
             }
-            LUI(x5, 0xffff0);
+            MOV64x(x5, 0xFFFFFFFFFFFF0000);
             AND(gd, gd, x5);
             OR(gd, gd, x1);
             break;
@@ -1846,7 +1847,7 @@ uintptr_t dynarec64_660F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
                 addr = geted(dyn, addr, ninst, nextop, &ed, x2, x4, &fixedaddress, rex, NULL, 1, 0);
                 LB(x1, ed, fixedaddress);
             }
-            LUI(x5, 0xffff0);
+            MOV64x(x5, 0xFFFFFFFFFFFF0000);
             AND(gd, gd, x5);
             ANDN(x1, x1, x5, x5);
             OR(gd, gd, x1);
@@ -1942,7 +1943,7 @@ uintptr_t dynarec64_660F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
         case 0xC5:
             INST_NAME("PEXTRW Gd,Ex,Ib");
             nextop = F8;
-            GETGD;
+            GETGDd;
             GETEX(x1, 0, 14);
             u8 = (F8) & 7;
             LHU(gd, wback, fixedaddress + u8 * 2);
@@ -2105,10 +2106,10 @@ uintptr_t dynarec64_660F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
             INST_NAME("PMOVMSKB Gd, Ex");
             nextop = F8;
             GETEX(x2, 0, 8);
-            GETGD;
+            GETGDd;
             LD(x1, wback, fixedaddress + 8); // high part
             LD(x2, wback, fixedaddress + 0); // low part, also destroyed wback(x2)
-            MOV64x(x5, 0x8080808080808080);
+            MOV64xs(x5, 0x8080808080808080, x3);
             MOV64x(x6, 0x0002040810204081);
             AND(x2, x2, x5);
             MUL(x2, x2, x6);
@@ -2343,6 +2344,7 @@ uintptr_t dynarec64_660F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
                 FRFLAGS(x5); // get back FPSR to check the IOC bit
                 ANDI(x5, x5, (1 << FR_NV) | (1 << FR_OF));
                 BEQ_MARK(x5, xZR);
+                emit_mxcsr_raise_invalid(x5);
                 MOV32w(x3, 0x80000000);
                 MARK;
                 FSFLAGSI(0); // // reset all bits
@@ -2660,6 +2662,7 @@ uintptr_t dynarec64_660F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
             break;
         case 0xF7:
             INST_NAME("MASKMOVDQU Gx, Ex");
+            UP32_READ(xRDI);
             nextop = F8;
             GETEX(x1, 0, 15);
             GETGX();

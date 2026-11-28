@@ -1,7 +1,4 @@
 // SPDX-License-Identifier: MIT
-#define _LARGEFILE_SOURCE 1
-#define _FILE_OFFSET_BITS 64
-#define _GNU_SOURCE         /* See feature_test_macros(7) */
 #if !defined(TERMUX) && !defined(ANDROID)
 # if defined(__has_include)
 #  if __has_include(<argp.h>)
@@ -67,6 +64,7 @@ extern const char *const sys_siglist[] __asm__("__sys_siglist");
 #include <sys/wait.h>
 #include <error.h>
 #include <sched.h>
+#include <dirent.h>
 #undef LOG_INFO
 #undef LOG_DEBUG
 
@@ -101,6 +99,10 @@ extern const char *const sys_siglist[] __asm__("__sys_siglist");
 #include "random.h"
 #include "cpumask.h"
 #include "x64tls.h"
+#include "guestalloc.h"
+#include "libc_malloc.h"
+#include "libc_dirent.h"
+#include "libc_ctype.h"
 #ifndef LOG_INFO
 #define LOG_INFO 1
 #endif
@@ -118,6 +120,504 @@ EXPORT ssize_t my_write(x64emu_t* emu, int fd, const void* buf, size_t count)
     return write(fd, buf, count);
 }
 
+EXPORT void* my_malloc(x64emu_t* emu, size_t size)
+{
+    (void)emu;
+    if(guest_alloc_is_active())
+        return guest_malloc(size);
+    return actual_calloc(1, size);
+}
+
+EXPORT void* my_calloc(x64emu_t* emu, size_t n, size_t size)
+{
+    (void)emu;
+    if(guest_alloc_is_active())
+        return guest_calloc(n, size);
+    return actual_calloc(n, size);
+}
+
+EXPORT void* my_realloc(x64emu_t* emu, void* p, size_t size)
+{
+    (void)emu;
+    if(guest_alloc_is_active()) {
+        if(!p)
+            return guest_malloc(size);
+        if(guest_alloc_owns(p))
+            return guest_realloc(p, size);
+    }
+    return actual_realloc(p, size);
+}
+
+EXPORT void my_free(x64emu_t* emu, void* p)
+{
+    (void)emu;
+    if(p && guest_alloc_is_active() && guest_alloc_owns(p)) {
+        guest_free(p);
+        return;
+    }
+    actual_free(p);
+}
+
+EXPORT void my_cfree(x64emu_t* emu, void* p)
+{
+    my_free(emu, p);
+}
+
+EXPORT void* my_reallocarray(x64emu_t* emu, void* p, size_t n, size_t size)
+{
+    if(n && size > (size_t)-1 / n) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    return my_realloc(emu, p, n*size);
+}
+
+EXPORT void* my_memalign(x64emu_t* emu, size_t align, size_t size)
+{
+    (void)emu;
+    if(guest_alloc_is_active())
+        return guest_memalign(align, size);
+    if(box64_is32bits && align==4)
+        align = sizeof(void*);
+    return actual_memalign(align, size);
+}
+
+EXPORT void* my_aligned_alloc(x64emu_t* emu, size_t align, size_t size)
+{
+    (void)emu;
+    if(guest_alloc_is_active())
+        return guest_memalign(align, size);
+    if(box64_is32bits && align==4)
+        return my_memalign(emu, align, size);
+    return actual_memalign(align, size);
+}
+
+EXPORT int my_posix_memalign(x64emu_t* emu, void** memptr, size_t align, size_t size)
+{
+    (void)emu;
+    if(guest_alloc_is_active())
+        return guest_posix_memalign(memptr, align, size);
+    if(box64_is32bits && align==4)
+        align = sizeof(void*);
+    if(!align || (align%sizeof(void*)) || (align & (align-1)))
+        return EINVAL;
+    void* ret = actual_memalign(align, size);
+    if(!ret)
+        return ENOMEM;
+    *memptr = ret;
+    return 0;
+}
+
+EXPORT void* my_valloc(x64emu_t* emu, size_t size)
+{
+    (void)emu;
+    if(guest_alloc_is_active())
+        return guest_memalign(box64_pagesize, size);
+    return actual_memalign(box64_pagesize, size);
+}
+
+EXPORT void* my_pvalloc(x64emu_t* emu, size_t size)
+{
+    (void)emu;
+    if(guest_alloc_is_active())
+        return guest_memalign(box64_pagesize, ALIGN(size));
+    return actual_memalign(box64_pagesize, ALIGN(size));
+}
+
+EXPORT size_t my_malloc_usable_size(x64emu_t* emu, void* p)
+{
+    (void)emu;
+    if(p && guest_alloc_is_active() && guest_alloc_owns(p))
+        return guest_usable_size(p);
+#if defined(ANDROID) || defined(STATICBUILD)
+    return malloc_usable_size(p);
+#else
+    return actual_malloc_usable_size(p);
+#endif
+}
+
+EXPORT void my_free_sized(x64emu_t* emu, void* p, size_t size)
+{
+    (void)size;
+    my_free(emu, p);
+}
+
+EXPORT void my_free_aligned_sized(x64emu_t* emu, void* p, size_t align, size_t size)
+{
+    (void)align; (void)size;
+    my_free(emu, p);
+}
+
+EXPORT int my_brk(x64emu_t* emu, void* addr)
+{
+    (void)emu;
+    if(guest_brk_is_active()) {
+        uintptr_t ret;
+        if(guest_brk_set((uintptr_t)addr, &ret)) {
+            errno = ENOMEM;
+            return -1;
+        }
+        return 0;
+    }
+    return brk(addr);
+}
+
+EXPORT void* my_sbrk(x64emu_t* emu, intptr_t inc)
+{
+    (void)emu;
+    if(guest_brk_is_active())
+        return guest_sbrk(inc);
+    return sbrk(inc);
+}
+
+EXPORT void* my___libc_malloc(x64emu_t* emu, size_t size) __attribute__((alias("my_malloc")));
+EXPORT void* my___libc_calloc(x64emu_t* emu, size_t n, size_t size) __attribute__((alias("my_calloc")));
+EXPORT void* my___libc_realloc(x64emu_t* emu, void* p, size_t size) __attribute__((alias("my_realloc")));
+EXPORT void my___libc_free(x64emu_t* emu, void* p) __attribute__((alias("my_free")));
+EXPORT void my___libc_cfree(x64emu_t* emu, void* p) __attribute__((alias("my_cfree")));
+EXPORT void* my___libc_memalign(x64emu_t* emu, size_t align, size_t size) __attribute__((alias("my_memalign")));
+EXPORT void* my___libc_valloc(x64emu_t* emu, size_t size) __attribute__((alias("my_valloc")));
+EXPORT void* my___libc_pvalloc(x64emu_t* emu, size_t size) __attribute__((alias("my_pvalloc")));
+EXPORT void* my___sbrk(x64emu_t* emu, intptr_t inc) __attribute__((alias("my_sbrk")));
+
+static char* guest_copy_string(const char* s)
+{
+    size_t l = strlen(s) + 1;
+    char* p = guest_malloc(l);
+    if(p)
+        memcpy(p, s, l);
+    return p;
+}
+
+EXPORT char* my_strdup(x64emu_t* emu, const char* s)
+{
+    (void)emu;
+    if(!guest_alloc_is_active())
+        return strdup(s);
+    return guest_copy_string(s);
+}
+EXPORT char* my___strdup(x64emu_t* emu, const char* s) __attribute__((alias("my_strdup")));
+
+EXPORT char* my_strndup(x64emu_t* emu, const char* s, size_t n)
+{
+    (void)emu;
+    if(!guest_alloc_is_active())
+        return strndup(s, n);
+    size_t l = strnlen(s, n);
+    char* p = guest_malloc(l+1);
+    if(!p)
+        return NULL;
+    memcpy(p, s, l);
+    p[l] = 0;
+    return p;
+}
+EXPORT char* my___strndup(x64emu_t* emu, const char* s, size_t n) __attribute__((alias("my_strndup")));
+
+EXPORT wchar_t* my_wcsdup(x64emu_t* emu, const wchar_t* s)
+{
+    (void)emu;
+    if(!guest_alloc_is_active())
+        return wcsdup(s);
+    size_t l = (wcslen(s)+1) * sizeof(wchar_t);
+    wchar_t* p = guest_malloc(l);
+    if(p)
+        memcpy(p, s, l);
+    return p;
+}
+
+EXPORT char* my_getcwd(x64emu_t* emu, char* buf, size_t size)
+{
+    (void)emu;
+    if(buf || !guest_alloc_is_active())
+        return getcwd(buf, size);
+    char* host = getcwd(NULL, 0);
+    if(!host)
+        return NULL;
+    char* ret = guest_copy_string(host);
+    box_free(host);
+    return ret;
+}
+
+EXPORT char* my___getcwd_chk(x64emu_t* emu, char* buf, size_t size, size_t buflen)
+{
+    if(size > buflen) {
+        errno = ERANGE;
+        return NULL;
+    }
+    return my_getcwd(emu, buf, size);
+}
+
+EXPORT char* my_get_current_dir_name(x64emu_t* emu)
+{
+    (void)emu;
+#ifndef ANDROID
+    if(!guest_alloc_is_active())
+        return get_current_dir_name();
+    char* host = get_current_dir_name();
+#else
+    char* host = getcwd(NULL, 0);
+#endif
+    if(!host || !guest_alloc_is_active())
+        return host;
+    char* ret = guest_copy_string(host);
+    box_free(host);
+    return ret;
+}
+
+EXPORT char* my_canonicalize_file_name(x64emu_t* emu, const char* name)
+{
+    (void)emu;
+    char* host = realpath(name, NULL);
+    if(!host || !guest_alloc_is_active())
+        return host;
+    char* ret = guest_copy_string(host);
+    box_free(host);
+    return ret;
+}
+
+#ifndef ANDROID
+EXPORT char* my_tempnam(x64emu_t* emu, const char* dir, const char* pfx)
+{
+    (void)emu;
+    char* host = tempnam(dir, pfx);
+    if(!host || !guest_alloc_is_active())
+        return host;
+    char* ret = guest_copy_string(host);
+    box_free(host);
+    return ret;
+}
+#endif
+
+static long guest_getdelim(x64emu_t* emu, char** lineptr, size_t* n, int delim, FILE* stream)
+{
+    (void)emu;
+    if(!lineptr || !n || !stream) {
+        errno = EINVAL;
+        return -1;
+    }
+    char* buf = *lineptr;
+    size_t cap = *n;
+    int created = 0;
+    if(!buf || !cap) {
+        cap = 128;
+        buf = guest_malloc(cap);
+        if(!buf) {
+            errno = ENOMEM;
+            return -1;
+        }
+        created = 1;
+    }
+    size_t len = 0;
+    int c = EOF;
+    for(;;) {
+        c = fgetc(stream);
+        if(c==EOF)
+            break;
+        if(len+1 >= cap) {
+            size_t ncap = cap * 2;
+            char* nbuf = guest_realloc(buf, ncap);
+            if(!nbuf) {
+                errno = ENOMEM;
+                if(created) {
+                    guest_free(buf);
+                    *lineptr = NULL;
+                    *n = 0;
+                }
+                return -1;
+            }
+            buf = nbuf;
+            cap = ncap;
+        }
+        buf[len++] = (char)c;
+        if(c==delim)
+            break;
+    }
+    if(len==0 && c==EOF) {
+        if(created) {
+            guest_free(buf);
+            *lineptr = NULL;
+            *n = 0;
+        }
+        return -1;
+    }
+    buf[len] = 0;
+    *lineptr = buf;
+    *n = cap;
+    return (long)len;
+}
+
+EXPORT long my_getdelim(x64emu_t* emu, char** lineptr, size_t* n, int delim, FILE* stream)
+{
+    if(!guest_alloc_is_active())
+        return getdelim(lineptr, n, delim, stream);
+    return guest_getdelim(emu, lineptr, n, delim, stream);
+}
+EXPORT long my___getdelim(x64emu_t* emu, char** lineptr, size_t* n, int delim, FILE* stream) __attribute__((alias("my_getdelim")));
+
+EXPORT long my_getline(x64emu_t* emu, char** lineptr, size_t* n, FILE* stream)
+{
+    if(!guest_alloc_is_active())
+        return getline(lineptr, n, stream);
+    return guest_getdelim(emu, lineptr, n, '\n', stream);
+}
+
+#ifndef ANDROID
+typedef struct my_memstream_s {
+    char*   buf;
+    size_t  size;
+    size_t  cap;
+    size_t  pos;
+    char**  bufp;
+    size_t* sizep;
+} my_memstream_t;
+
+static int my_memstream_grow(my_memstream_t* ms, size_t need)
+{
+    if(ms->cap >= need)
+        return 0;
+    size_t ncap = ms->cap ? ms->cap : 128;
+    while(ncap < need) {
+        if(ncap > ((size_t)-1)/2)
+            return -1;
+        ncap *= 2;
+    }
+    char* nbuf = guest_realloc(ms->buf, ncap);
+    if(!nbuf)
+        return -1;
+    ms->buf = nbuf;
+    ms->cap = ncap;
+    return 0;
+}
+
+static void my_memstream_publish(my_memstream_t* ms)
+{
+    if(ms->bufp)
+        *ms->bufp = ms->buf;
+    if(ms->sizep)
+        *ms->sizep = ms->size;
+}
+
+static ssize_t my_memstream_write(void* cookie, const char* buf, size_t size)
+{
+    my_memstream_t* ms = (my_memstream_t*)cookie;
+    if(size > (size_t)-1 - ms->pos - 1) {
+        errno = ENOMEM;
+        return -1;
+    }
+    if(my_memstream_grow(ms, ms->pos + size + 1)) {
+        errno = ENOMEM;
+        return -1;
+    }
+    memcpy(ms->buf + ms->pos, buf, size);
+    ms->pos += size;
+    if(ms->pos > ms->size)
+        ms->size = ms->pos;
+    ms->buf[ms->size] = 0;
+    my_memstream_publish(ms);
+    return (ssize_t)size;
+}
+
+static int my_memstream_seek(void* cookie, off_t* offset, int whence)
+{
+    my_memstream_t* ms = (my_memstream_t*)cookie;
+    off_t base;
+    switch(whence) {
+        case SEEK_SET: base = 0; break;
+        case SEEK_CUR: base = (off_t)ms->pos; break;
+        case SEEK_END: base = (off_t)ms->size; break;
+        default: errno = EINVAL; return -1;
+    }
+    off_t np = base + *offset;
+    if(np < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    if(my_memstream_grow(ms, (size_t)np + 1)) {
+        errno = ENOMEM;
+        return -1;
+    }
+    if((size_t)np > ms->size)
+        memset(ms->buf + ms->size, 0, (size_t)np - ms->size);
+    ms->pos = (size_t)np;
+    if(ms->pos > ms->size)
+        ms->size = ms->pos;
+    ms->buf[ms->size] = 0;
+    *offset = np;
+    my_memstream_publish(ms);
+    return 0;
+}
+
+static int my_memstream_close(void* cookie)
+{
+    my_memstream_t* ms = (my_memstream_t*)cookie;
+    if(my_memstream_grow(ms, ms->size + 1)) {
+        box_free(ms);
+        return -1;
+    }
+    ms->buf[ms->size] = 0;
+    my_memstream_publish(ms);
+    box_free(ms);
+    return 0;
+}
+
+EXPORT FILE* my_open_memstream(x64emu_t* emu, char** bufp, size_t* sizep)
+{
+    (void)emu;
+    if(!guest_alloc_is_active())
+        return open_memstream(bufp, sizep);
+    my_memstream_t* ms = (my_memstream_t*)box_calloc(1, sizeof(my_memstream_t));
+    if(!ms)
+        return NULL;
+    ms->bufp = bufp;
+    ms->sizep = sizep;
+    cookie_io_functions_t io = { NULL, my_memstream_write, my_memstream_seek, my_memstream_close };
+    FILE* f = fopencookie(ms, "w", io);
+    if(!f) {
+        box_free(ms);
+        return NULL;
+    }
+    return f;
+}
+#endif
+
+static void free_host_dirent_list(struct dirent** list, int n)
+{
+    if(!list)
+        return;
+    for(int i=0; i<n; ++i)
+        free(list[i]);
+    free(list);
+}
+
+static int guest_scandir_copy(struct dirent*** namelist, struct dirent** hostlist, int n)
+{
+    if(!namelist || n<0)
+        return -1;
+    if(n==0) {
+        *namelist = NULL;
+        return 0;
+    }
+    struct dirent** guestlist = (struct dirent**)guest_calloc(n+1, sizeof(struct dirent*));
+    if(!guestlist) {
+        errno = ENOMEM;
+        return -1;
+    }
+    for(int i=0; i<n; ++i) {
+        struct dirent* entry = (struct dirent*)guest_malloc(hostlist[i]->d_reclen);
+        if(!entry) {
+            for(int j=0; j<i; ++j)
+                guest_free(guestlist[j]);
+            guest_free(guestlist);
+            errno = ENOMEM;
+            return -1;
+        }
+        memcpy(entry, hostlist[i], hostlist[i]->d_reclen);
+        guestlist[i] = entry;
+    }
+    guestlist[n] = NULL;
+    *namelist = guestlist;
+    return n;
+}
 
 #define LIBNAME libc
 const char* libcName = "libc.so.6";
@@ -444,7 +944,7 @@ static void* findcompare_dirFct(void* fct)
 // filter64
 #define GO(A)   \
 static uintptr_t my_filter64_fct_##A = 0;                                   \
-static int my_filter64_##A(const struct dirent64* a)                        \
+static int my_filter64_##A(const struct dirent* a)                        \
 {                                                                           \
     return (int)RunFunctionFmt(my_filter64_fct_##A, "p", a);          \
 }
@@ -467,7 +967,7 @@ static void* findfilter64Fct(void* fct)
 // compare64
 #define GO(A)   \
 static uintptr_t my_compare64_fct_##A = 0;                                      \
-static int my_compare64_##A(const struct dirent64* a, const struct dirent64* b) \
+static int my_compare64_##A(const struct dirent* a, const struct dirent* b) \
 {                                                                               \
     return (int)RunFunctionFmt(my_compare64_fct_##A, "pp", a, b);         \
 }
@@ -1271,7 +1771,20 @@ EXPORT int my___sprintf_chk(x64emu_t* emu, void* buff, int flag, size_t l, void 
 EXPORT int my_asprintf(x64emu_t* emu, void** buff, void * fmt, uint64_t * b) {
     myStackAlign(emu, (const char*)fmt, b, emu->scratch, R_EAX, 2);
     PREPARE_VALIST;
-    return vasprintf((char**)buff, (char*)fmt, VARARGS);
+    char* host = NULL;
+    int r = vasprintf(&host, (char*)fmt, VARARGS);
+    if(r<0 || !host || !buff) {
+        if(buff) *buff = NULL;
+        return -1;
+    }
+    if(!guest_alloc_is_active()) {
+        *buff = host;
+        return r;
+    }
+    char* ret = guest_copy_string(host);
+    box_free(host);
+    *buff = ret;
+    return ret ? r : -1;
 }
 EXPORT int my___asprintf(x64emu_t* emu, void** buff, void * fmt, uint64_t * b) __attribute__((alias("my_asprintf")));
 
@@ -1283,7 +1796,20 @@ EXPORT int my_vasprintf(x64emu_t* emu, char** buff, void* fmt, x64_va_list_t b) 
     myStackAlignValist(emu, (const char*)fmt, emu->scratch, b);
     PREPARE_VALIST;
     #endif
-    return vasprintf(buff, fmt, VARARGS);
+    char* host = NULL;
+    int r = vasprintf(&host, fmt, VARARGS);
+    if(r<0 || !host || !buff) {
+        if(buff) *buff = NULL;
+        return -1;
+    }
+    if(!guest_alloc_is_active()) {
+        *buff = host;
+        return r;
+    }
+    char* ret = guest_copy_string(host);
+    box_free(host);
+    *buff = ret;
+    return ret ? r : -1;
 }
 
 EXPORT int my_vsprintf(x64emu_t* emu, void* buff,  void * fmt, x64_va_list_t b) {
@@ -1491,14 +2017,39 @@ EXPORT int my___vasprintf_chk(x64emu_t* emu, void* buff, int flags, void* fmt, x
     myStackAlignValist(emu, (const char*)fmt, emu->scratch, b);
     PREPARE_VALIST;
     #endif
-    int r = vasprintf(buff, fmt, VARARGS);
-    return r;
+    char* host = NULL;
+    int r = vasprintf(&host, fmt, VARARGS);
+    if(r<0 || !host || !buff) {
+        if(buff) *(char**)buff = NULL;
+        return -1;
+    }
+    if(!guest_alloc_is_active()) {
+        *(char**)buff = host;
+        return r;
+    }
+    char* ret = guest_copy_string(host);
+    box_free(host);
+    *(char**)buff = ret;
+    return ret ? r : -1;
 }
 EXPORT int my___asprintf_chk(x64emu_t* emu, void* result_ptr, int flags, void* fmt, void* b)
 {
     myStackAlign(emu, (const char*)fmt, b, emu->scratch, R_EAX, 3);
     PREPARE_VALIST;
-    return vasprintf((char**)result_ptr, (char*)fmt, VARARGS);
+    char* host = NULL;
+    int r = vasprintf(&host, (char*)fmt, VARARGS);
+    if(r<0 || !host || !result_ptr) {
+        if(result_ptr) *(char**)result_ptr = NULL;
+        return -1;
+    }
+    if(!guest_alloc_is_active()) {
+        *(char**)result_ptr = host;
+        return r;
+    }
+    char* ret = guest_copy_string(host);
+    box_free(host);
+    *(char**)result_ptr = ret;
+    return ret ? r : -1;
 }
 EXPORT int my_vswprintf(x64emu_t* emu, void* buff, size_t s, void * fmt, x64_va_list_t b) {
     (void)emu;
@@ -1705,8 +2256,8 @@ EXPORT void my__ITM_deregisterTMCloneTable(x64emu_t* emu, void* p) { (void)emu; 
 EXPORT int my___fxstat(x64emu_t *emu, int vers, int fd, void* buf)
 {
     (void)emu; (void)vers;
-    struct stat64 st;
-    int r = fstat64(fd, buf?&st:buf);
+    struct stat st;
+    int r = fstat(fd, buf?&st:buf);
     if(buf && !r)
         UnalignStat64(&st, buf);
     return r;
@@ -1747,8 +2298,8 @@ EXPORT int my___xmknodat(x64emu_t* emu, int v, int dirfd, char* path, uint32_t m
 EXPORT int my___xstat(x64emu_t* emu, int v, void* path, void* buf)
 {
     (void)emu; (void)v;
-    struct stat64 st;
-    int r = stat64((const char*)path, buf?&st:buf);
+    struct stat st;
+    int r = stat((const char*)path, buf?&st:buf);
     if(buf && !r)
         UnalignStat64(&st, buf);
     return r;
@@ -1758,8 +2309,8 @@ EXPORT int my___xstat64(x64emu_t* emu, int v, void* path, void* buf) __attribute
 EXPORT int my___lxstat(x64emu_t* emu, int v, void* name, void* buf)
 {
     (void)emu; (void)v;
-    struct stat64 st;
-    int r = lstat64((const char*)name, buf?&st:buf);
+    struct stat st;
+    int r = lstat((const char*)name, buf?&st:buf);
     if(buf && !r)
         UnalignStat64(&st, buf);
     return r;
@@ -1769,8 +2320,8 @@ EXPORT int my___lxstat64(x64emu_t* emu, int v, void* name, void* buf) __attribut
 EXPORT int my___fxstatat(x64emu_t* emu, int v, int d, void* path, void* buf, int flags)
 {
     (void)emu; (void)v;
-    struct  stat64 st;
-    int r = fstatat64(d, path, &st, flags);
+    struct  stat st;
+    int r = fstatat(d, path, &st, flags);
     if(!r)
         UnalignStat64(&st, buf);
     return r;
@@ -1823,7 +2374,7 @@ EXPORT int my_fstatat64(x64emu_t *emu, int fd, const char* path, void* buf, int 
 
 EXPORT int my__IO_file_stat(x64emu_t* emu, void* f, void* buf)
 {
-    struct stat64 st;
+    struct stat st;
     int r = my->_IO_file_stat(f, &st);
     UnalignStat64(&st, buf);
     return r;
@@ -1832,16 +2383,16 @@ EXPORT int my__IO_file_stat(x64emu_t* emu, void* f, void* buf)
 #if 0
 EXPORT int my_fstatfs64(int fd, void* buf)
 {
-    struct statfs64 st;
-    int r = fstatfs64(fd, &st);
+    struct statfs st;
+    int r = fstatfs(fd, &st);
     UnalignStatFS64(&st, buf);
     return r;
 }
 
 EXPORT int my_statfs64(const char* path, void* buf)
 {
-    struct statfs64 st;
-    int r = statfs64(path, &st);
+    struct statfs st;
+    int r = statfs(path, &st);
     UnalignStatFS64(&st, buf);
     return r;
 }
@@ -1898,21 +2449,22 @@ typedef struct compare_r_s {
     int       r;
 } compare_r_t;
 
-static int my_compare_r_cb(void* a, void* b, compare_r_t* arg)
+static int my_compare_r_cb(const void* a, const void* b, void* userdata)
 {
-    return (int)RunFunctionWithEmu(arg->emu, 0, arg->f, 2+arg->r, a, b, arg->data);
+    compare_r_t* arg = userdata;
+    return (int)RunFunctionWithEmu(arg->emu, 0, arg->f, 2+arg->r, (void*)a, (void*)b, arg->data);
 }
 EXPORT void my_qsort(x64emu_t* emu, void* base, size_t nmemb, size_t size, void* fnc)
 {
     compare_r_t args;
     args.emu = emu; args.f = (uintptr_t)fnc; args.r = 0; args.data = NULL;
-    qsort_r(base, nmemb, size, (__compar_d_fn_t)my_compare_r_cb, &args);
+    qsort_r(base, nmemb, size, my_compare_r_cb, &args);
 }
 EXPORT void my_qsort_r(x64emu_t* emu, void* base, size_t nmemb, size_t size, void* fnc, void* data)
 {
     compare_r_t args;
     args.emu = emu; args.f = (uintptr_t)fnc; args.r = 1; args.data = data;
-    qsort_r(base, nmemb, size, (__compar_d_fn_t)my_compare_r_cb, &args);
+    qsort_r(base, nmemb, size, my_compare_r_cb, &args);
 }
 EXPORT void* my_bsearch(x64emu_t* emu, void* key, void* base, size_t nmemb, size_t size, void* fnc)
 {
@@ -2032,7 +2584,7 @@ EXPORT void* my_readdir(x64emu_t* emu, void* dirp)
 {
     if (BOX64ENV(fix_64bit_inodes))
     {
-        struct dirent64 *dp64 = readdir64((DIR *)dirp);
+        struct dirent *dp64 = readdir((DIR *)dirp);
         if (!dp64) return NULL;
         uint32_t ino32 = dp64->d_ino ^ (dp64->d_ino >> 32);
         int32_t off32 = dp64->d_off;
@@ -2057,7 +2609,7 @@ EXPORT void* my_readdir(x64emu_t* emu, void* dirp)
 
 EXPORT int32_t my_readdir_r(x64emu_t* emu, void* dirp, void* entry, void** result)
 {
-    struct dirent64 d64, *dp64;
+    struct dirent d64, *dp64;
     if (BOX64ENV(fix_64bit_inodes) && (sizeof(d64.d_name) > 1))
     {
         static iFppp_t f = NULL;
@@ -2068,7 +2620,7 @@ EXPORT int32_t my_readdir_r(x64emu_t* emu, void* dirp, void* entry, void** resul
                 *result = NULL;
                 return 0;
             }
-            f = (iFppp_t)dlsym(lib->w.lib, "readdir64_r");
+            f = (iFppp_t)dlsym(lib->w.lib, "readdir_r");
         }
 
         int r = f(dirp, &d64, &dp64);
@@ -2079,7 +2631,7 @@ EXPORT int32_t my_readdir_r(x64emu_t* emu, void* dirp, void* entry, void** resul
         }
 
         struct i386_dirent *dp32 = (struct i386_dirent *)entry;
-        int namelen = dp64->d_reclen - offsetof(struct dirent64, d_name);
+        int namelen = dp64->d_reclen - offsetof(struct dirent, d_name);
         if (namelen > sizeof(dp32->d_name))
         {
             *result = NULL;
@@ -2163,6 +2715,17 @@ static long isProcMem(const char* path)
 }
 
 #define MAX_PATH_LENGTH 4096
+static int isPathPageReadable(uintptr_t page)
+{
+#ifdef __NR_process_vm_readv
+    char c;
+    struct iovec local = { &c, 1 };
+    struct iovec remote = { (void*)page, 1 };
+    return syscall(__NR_process_vm_readv, getpid(), &local, 1, &remote, 1, 0) == 1;
+#else
+    return 0;
+#endif
+}
 static int isPathValid(const char* path)
 {
     if(!path)
@@ -2173,7 +2736,7 @@ static int isPathValid(const char* path)
         uintptr_t page = ALIGN_DOWN(p + i);
         if(page != cache_page) {
             cache_page = page;
-            if(!(getProtection_fast(cache_page) & PROT_READ))
+            if(!(getProtection_fast(cache_page) & PROT_READ) && !isPathPageReadable(cache_page))
                 return 0;
         }
         if(!path[i])
@@ -2387,16 +2950,11 @@ enum {
 
 static int32_t open_func_fallback(char *pathname, int32_t flags, uint32_t open_mode, char *fopen_mode, int type, FILE **file)
 {
-    if (type == FOPEN64_TYPE) {
-        *file = fopen64(pathname, fopen_mode);
-        return 0;
-    } else if (type == FOPEN_TYPE) {
+   if (type == FOPEN_TYPE || type == FOPEN64_TYPE) {
         *file = fopen(pathname, fopen_mode);
         return 0;
-    } else if (type == OPEN_TYPE) {
+    } else if (type == OPEN_TYPE || type == OPEN64_TYPE) {
         return open(pathname, flags, open_mode);
-    } else if (type == OPEN64_TYPE) {
-        return open64(pathname, flags, open_mode);
     }
     return -1;
 }
@@ -2654,7 +3212,7 @@ EXPORT int32_t my_epoll_pwait2(x64emu_t* emu, int epfd, void* events, int maxeve
 EXPORT int32_t my_glob64(x64emu_t *emu, void* pat, int32_t flags, void* errfnc, void* pglob)
 {
     (void)emu;
-    return glob64(pat, flags, findgloberrFct(errfnc), pglob);
+    return glob(pat, flags, findgloberrFct(errfnc), pglob);
 }
 EXPORT int32_t my_glob(x64emu_t *emu, void* pat, int32_t flags, void* errfnc, void* pglob) __attribute__((alias("my_glob64")));
 #endif
@@ -2662,33 +3220,75 @@ EXPORT int32_t my_glob(x64emu_t *emu, void* pat, int32_t flags, void* errfnc, vo
 EXPORT int my_scandir64(x64emu_t *emu, void* dir, void* namelist, void* sel, void* comp)
 {
     (void)emu;
-    return scandir64(dir, namelist, findfilter64Fct(sel), findcompare64Fct(comp));
+    if(!namelist) {
+        errno = EINVAL;
+        return -1;
+    }
+    struct dirent** hostlist = NULL;
+    int n = scandir(dir, &hostlist, findfilter64Fct(sel), findcompare64Fct(comp));
+    if(n<0)
+        return n;
+    if(!guest_alloc_is_active()) {
+        *(struct dirent***)namelist = hostlist;
+        return n;
+    }
+    int ret = guest_scandir_copy((struct dirent***)namelist, hostlist, n);
+    free_host_dirent_list(hostlist, n);
+    return ret;
 }
 EXPORT int my_scandir(x64emu_t *emu, void* dir, void* namelist, void* sel, void* comp) __attribute__((alias("my_scandir64")));
 
 EXPORT int my_scandirat(x64emu_t *emu, int dirfd, void* dirp, void* namelist, void* sel, void* comp)
 {
     (void)emu;
-    return scandirat(dirfd, dirp, namelist, findfilter64Fct(sel), findcompare64Fct(comp));
+    if(!namelist) {
+        errno = EINVAL;
+        return -1;
+    }
+    struct dirent** hostlist = NULL;
+    int n = scandirat(dirfd, dirp, &hostlist, findfilter64Fct(sel), findcompare64Fct(comp));
+    if(n<0)
+        return n;
+    if(!guest_alloc_is_active()) {
+        *(struct dirent***)namelist = hostlist;
+        return n;
+    }
+    int ret = guest_scandir_copy((struct dirent***)namelist, hostlist, n);
+    free_host_dirent_list(hostlist, n);
+    return ret;
 }
 
 EXPORT int my_scandirat64(x64emu_t *emu, int dirfd, void* dirp, void* namelist, void* sel, void* comp)
 {
     (void)emu;
-    return scandirat64(dirfd, dirp, namelist, findfilter64Fct(sel), findcompare64Fct(comp));
+    if(!namelist) {
+        errno = EINVAL;
+        return -1;
+    }
+    struct dirent** hostlist = NULL;
+    int n = scandirat(dirfd, dirp, &hostlist, findfilter64Fct(sel), findcompare64Fct(comp));
+    if(n<0)
+        return n;
+    if(!guest_alloc_is_active()) {
+        *(struct dirent***)namelist = hostlist;
+        return n;
+    }
+    int ret = guest_scandir_copy((struct dirent***)namelist, hostlist, n);
+    free_host_dirent_list(hostlist, n);
+    return ret;
 }
 
 EXPORT int my_ftw64(x64emu_t* emu, void* filename, void* func, int descriptors)
 {
     (void)emu;
-    return ftw64(filename, findftw64Fct(func), descriptors);
+    return ftw(filename, findftw64Fct(func), descriptors);
 }
 EXPORT int my_ftw(x64emu_t* emu, void* filename, void* func, int descriptors) __attribute__((alias("my_ftw64")));
 
 EXPORT int32_t my_nftw64(x64emu_t* emu, void* pathname, void* B, int32_t nopenfd, int32_t flags)
 {
     (void)emu;
-    return nftw64(pathname, findnftw64Fct(B), nopenfd, flags);
+    return nftw(pathname, findnftw64Fct(B), nopenfd, flags);
 }
 EXPORT int my_nftw(x64emu_t* emu, void* pathname, void* B, int32_t nopenfd, int32_t flags) __attribute__((alias("my_nftw64")));
 
@@ -3616,10 +4216,15 @@ EXPORT void my___explicit_bzero_chk(x64emu_t* emu, void* dst, uint32_t len, uint
 
 EXPORT void* my_realpath(x64emu_t* emu, void* path, void* resolved_path)
 {
-    if(path && isProcSelf(path, "exe")) {
-        return realpath(emu->context->fullpath, resolved_path);
-    }
-    return realpath(path, resolved_path);
+    const char* p = (path && isProcSelf(path, "exe")) ? emu->context->fullpath : (const char*)path;
+    if(resolved_path || !guest_alloc_is_active())
+        return realpath(p, resolved_path);
+    char* host = realpath(p, NULL);
+    if(!host)
+        return NULL;
+    char* ret = guest_copy_string(host);
+    box_free(host);
+    return ret;
 }
 
 EXPORT int my_readlinkat(x64emu_t* emu, int fd, void* path, void* buf, size_t bufsize)
@@ -3933,6 +4538,14 @@ EXPORT void* my_mmap64(x64emu_t* emu, void *addr, size_t length, int prot, int f
 }
 EXPORT void* my_mmap(x64emu_t* emu, void *addr, size_t length, int prot, int flags, int fd, ssize_t offset) __attribute__((alias("my_mmap64")));
 
+static void setMremapProtection(uintptr_t addr, size_t size, uint32_t prot, uint32_t flag)
+{
+    if(flag)
+        setProtection_flag(addr, size, prot, flag);
+    else
+        setProtection_mmap(addr, size, prot);
+}
+
 EXPORT void* my_mremap(x64emu_t* emu, void* old_addr, size_t old_size, size_t new_size, int flags, void* new_addr)
 {
     #ifdef DYNAREC
@@ -3940,6 +4553,7 @@ EXPORT void* my_mremap(x64emu_t* emu, void* old_addr, size_t old_size, size_t ne
     last_mmap_0_len = 0;
     #endif
     (void)emu;
+    uint32_t oldflag = (uint32_t)memExist((uintptr_t)old_addr);
     lockMmapMutex();
     if((emu || box64_is32bits) && (BOX64ENV(log)>=LOG_DEBUG || BOX64ENV(dynarec_log)>=LOG_DEBUG)) {printf_log(LOG_NONE, "mremap(%p, %lu, %lu, %d, %p)=>", old_addr, old_size, new_size, flags, new_addr);}
     void* ret = mremap(old_addr, old_size, new_size, flags, new_addr);
@@ -3948,7 +4562,7 @@ EXPORT void* my_mremap(x64emu_t* emu, void* old_addr, size_t old_size, size_t ne
         uint32_t prot = getProtection((uintptr_t)old_addr)&~PROT_CUSTOM;
         if(ret==old_addr) {
             if(old_size && old_size<new_size) {
-                setProtection_mmap((uintptr_t)ret+old_size, new_size-old_size, prot);
+                setMremapProtection((uintptr_t)ret+old_size, new_size-old_size, prot, oldflag);
                 setGuestProtection((uintptr_t)ret+old_size, new_size-old_size, prot, 1);
                 #ifdef DYNAREC
                 if(BOX64ENV(dynarec))
@@ -3962,7 +4576,7 @@ EXPORT void* my_mremap(x64emu_t* emu, void* old_addr, size_t old_size, size_t ne
                     cleanDBFromAddressRange((uintptr_t)ret+new_size, old_size-new_size, 1);
                 #endif
             } else if(!old_size) {
-                setProtection_mmap((uintptr_t)ret, new_size, prot);
+                setMremapProtection((uintptr_t)ret, new_size, prot, oldflag);
                 setGuestProtection((uintptr_t)ret, new_size, prot, 1);
                 #ifdef DYNAREC
                 if(BOX64ENV(dynarec))
@@ -3982,7 +4596,7 @@ EXPORT void* my_mremap(x64emu_t* emu, void* old_addr, size_t old_size, size_t ne
                     cleanDBFromAddressRange((uintptr_t)old_addr, old_size, 1);
                 #endif
             }
-            setProtection_mmap((uintptr_t)ret, new_size, prot); // should copy the protection from old block
+            setMremapProtection((uintptr_t)ret, new_size, prot, oldflag); // should copy the protection from old block
             setGuestProtection((uintptr_t)ret, new_size, prot, 1);
             #ifdef DYNAREC
             if(BOX64ENV(dynarec))
@@ -4168,6 +4782,7 @@ EXPORT int my_posix_madvise(x64emu_t* emu, void* addr, size_t length, int advice
 typedef struct mallinfo (*mallinfo_fnc)(void);
 EXPORT void* my_mallinfo(x64emu_t* emu, void* p)
 {
+#ifdef HAVE_MALLINFO
     static mallinfo_fnc f = NULL;
     static int inited = 0;
     if(!inited) {
@@ -4177,26 +4792,15 @@ EXPORT void* my_mallinfo(x64emu_t* emu, void* p)
     if(f)
         *(struct mallinfo*)p=f();
     else
+#endif
         memset(p, 0, sizeof(struct mallinfo));
     return p;
 }
 
-struct my_mallinfo2_s {
-    size_t arena;
-    size_t ordblks;
-    size_t smblks;
-    size_t hblks;
-    size_t hblkhd;
-    size_t usmblks;
-    size_t fsmblks;
-    size_t uordblks;
-    size_t fordblks;
-    size_t keepcost;
-};
-
-typedef struct my_mallinfo2_s (*mallinfo2_fnc)(void);
+typedef struct mallinfo2 (*mallinfo2_fnc)(void);
 EXPORT void* my_mallinfo2(x64emu_t* emu, void* p)
 {
+#ifdef HAVE_MALLINFO2
     static mallinfo2_fnc f = NULL;
     static int inited = 0;
     if(!inited) {
@@ -4204,9 +4808,10 @@ EXPORT void* my_mallinfo2(x64emu_t* emu, void* p)
         f = (mallinfo2_fnc)dlsym(my_lib->w.lib, "mallinfo2");
     }
     if(f)
-        *(struct my_mallinfo2_s*)p = f();
+        *(struct mallinfo2*)p = f();
     else
-        memset(p, 0, sizeof(struct my_mallinfo2_s));
+#endif
+        memset(p, 0, sizeof(struct mallinfo2));
     return p;
 }
 
@@ -4262,7 +4867,7 @@ static ssize_t my_cookie_write(void *p, const char *buf, size_t size)
     my_cookie_t* cookie = (my_cookie_t*)p;
     return (ssize_t)RunFunctionFmt(cookie->w, "ppL", cookie->cookie, buf, size)       ;
 }
-static int my_cookie_seek(void *p, off64_t *offset, int whence)
+static int my_cookie_seek(void *p, off_t *offset, int whence)
 {
     my_cookie_t* cookie = (my_cookie_t*)p;
     return RunFunctionFmt(cookie->s, "ppi", cookie->cookie, offset, whence)       ;
@@ -4359,8 +4964,10 @@ void obstackSetup() {
 void obstackSetup();
 #endif
 
-EXPORT void* my_malloc(unsigned long size)
+EXPORT void* my_tbb_malloc_proxy(unsigned long size)
 {
+    if(guest_alloc_is_active())
+        return guest_malloc(size);
     return calloc(1, size);
 }
 
@@ -4382,10 +4989,10 @@ EXPORT int my_getrlimit(x64emu_t* emu, uint32_t resource, struct rlimit* rlim)
     return my___getrlimit(emu, resource, rlim);
 }
 
-EXPORT int my_getrlimit64(x64emu_t* emu, uint32_t resource, struct rlimit64* rlim)
+EXPORT int my_getrlimit64(x64emu_t* emu, uint32_t resource, struct rlimit* rlim)
 {
     (void)emu;
-    return check_getrlimit_buffer(rlim, sizeof(*rlim)) ? getrlimit64(resource, rlim) : -1;
+    return check_getrlimit_buffer(rlim, sizeof(*rlim)) ? getrlimit(resource, rlim) : -1;
 }
 
 EXPORT int my_setrlimit(x64emu_t* emu, int ressource, const struct rlimit *rlim)
@@ -4780,7 +5387,9 @@ EXPORT int my_backtrace_ip(x64emu_t* emu, void** buffer, int size)
 EXPORT char** my_backtrace_symbols(x64emu_t* emu, uintptr_t* buffer, int size)
 {
     (void)emu;
-    char** ret = (char**)calloc(1, size*sizeof(char*) + size*200);  // capping each strings to 200 chars, not using box_calloc (program space)
+    char** ret = (char**)guest_calloc(1, size*sizeof(char*) + size*200);
+    if(!ret)
+        return NULL;
     char* s = (char*)(ret+size);
     for (int i=0; i<size; ++i) {
         uintptr_t start = 0;
@@ -4845,7 +5454,7 @@ EXPORT int my_stime(x64emu_t* emu, const time_t *t)
 }
 
 int GetTID();
-#ifdef ANDROID
+#if defined(ANDROID) || ! defined(__GLIBC__)
 void updateGlibcTidCache() {}
 #else
 struct glibc_pthread {
@@ -5336,7 +5945,7 @@ EXPORT int my_sched_getaffinity(x64emu_t* emu, pid_t pid, size_t sz, cpu_set_t* 
     int ret = sched_getaffinity(pid, sz, (cpu_set_t*)mask_);
     if(ret>=0) {
         cpumask_shiftright(mask_, sz, skipcpu);
-        cpumask_maxcpu(mask, sz, maxcpu);
+        cpumask_maxcpu(mask_, sz, maxcpu);
         memcpy(mask, mask_, sz);
     }
     return ret;
@@ -5385,7 +5994,7 @@ EXPORT int my_sched_setaffinity(x64emu_t* emu, pid_t pid, size_t sz, cpu_set_t* 
         return sched_setaffinity(pid, sz, mask);
     uint8_t mask_[sz];
     memcpy(mask_, mask, sz);
-    cpumask_maxcpu(mask, sz, maxcpu);
+    cpumask_maxcpu(mask_, sz, maxcpu);
     cpumask_shiftleft(mask_, sz, skipcpu);
     return sched_setaffinity(pid, sz, (cpu_set_t*)mask_);
 }

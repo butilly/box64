@@ -56,7 +56,15 @@ NTSTATUS WINAPI ThreadInit(void)
         return STATUS_NO_MEMORY;
     }
     area->EmulatorData[EC_DATA_THR] = thr;
-    area->SuspendDoorbell = &thr->doorbell;
+    area->SuspendDoorbell = (ULONG*)&emu->suspend_doorbell;
+    emu->live_mxcsr = emu->live_fpcr = BOX64EC_MXCSR_UNKNOWN;
+    if (Box64EC_InitCallretStack(emu)) {
+        area->SuspendDoorbell = NULL;
+        area->EmulatorData[EC_DATA_THR] = NULL;
+        WinFree(thr);
+        WinFree(emu);
+        return STATUS_NO_MEMORY;
+    }
 
     emu->context = &Box64EC_Context;
     for (int i = 0; i < 16; ++i)
@@ -109,6 +117,7 @@ static void free_thread_state(CHPE_V2_CPU_AREA_INFO* area)
     emu = InterlockedExchangePointer(&area->EmulatorData[EC_DATA_EMU], NULL);
     thr = InterlockedExchangePointer(&area->EmulatorData[EC_DATA_THR], NULL);
     if (emu) {
+        Box64EC_FreeCallretStack(emu);
         FreeX64Emu(&emu);
     }
     if (thr)

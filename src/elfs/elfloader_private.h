@@ -68,6 +68,7 @@ typedef struct elfheader_s {
     }           VerDef;
     int         szVerDef;
     int         e_type;
+    uintptr_t   e_phoff;
     uint32_t    flags;
     uintptr_t   hash;
     uintptr_t   gnu_hash;
@@ -81,6 +82,8 @@ typedef struct elfheader_s {
     uintptr_t   initentry;
     uintptr_t   initarray;
     size_t      initarray_sz;
+    uintptr_t   preinitarray;
+    size_t      preinitarray_sz;
     uintptr_t   finientry;
     uintptr_t   finiarray;
     size_t      finiarray_sz;
@@ -124,10 +127,10 @@ typedef struct elfheader_s {
 
     int64_t     tlsbase;    // the base of the tlsdata in the global tlsdata (always negative)
 
+    int         preinit_done;
     int         init_done;
     int         fini_done;
     int         refcnt;     // ref count for the elf
-    int         malloc_hook_2;  // this elf hook malloc, hacking it
     int         gnuunique;  // set if contains some STB_GNU_UNIQUE binding, preventing dlclose to unload the lib
     int         dynamic_patched;
 

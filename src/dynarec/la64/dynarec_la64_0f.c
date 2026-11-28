@@ -300,12 +300,12 @@ uintptr_t dynarec64_0F(dynarec_la64_t* dyn, uintptr_t addr, uintptr_t ip, int ni
             break;
         case 0x17:
             nextop = F8;
-            INST_NAME("MOVHPS Ex,Gx");
-            GETGX(v0, 0);
             if (MODREG) {
-                v1 = sse_get_reg(dyn, ninst, x1, (nextop & 7) + (rex.b << 3), 1);
-                VEXTRINS_D(v1, v0, 0x01);
+                INST_NAME("Illegal 0F 17");
+                UDF();
             } else {
+                INST_NAME("MOVHPS Ex,Gx");
+                GETGX(v0, 0);
                 addr = geted(dyn, addr, ninst, nextop, &ed, x2, x3, &fixedaddress, rex, NULL, 0, 0);
                 VSTELM_D(v0, ed, 0, 1);
                 SMWRITE2();
@@ -1669,13 +1669,11 @@ uintptr_t dynarec64_0F(dynarec_la64_t* dyn, uintptr_t addr, uintptr_t ip, int ni
 #undef GO
         case 0xA0:
             INST_NAME("PUSH FS");
-            MARK_LEAF_RSP(LEAF_RSP_PUSHPOP);
             LD_HU(x2, xEmu, offsetof(x64emu_t, segs[_FS]));
             PUSH1z(x2);
             break;
         case 0xA1:
             INST_NAME("POP FS");
-            MARK_LEAF_RSP(LEAF_RSP_PUSHPOP);
             POP1z(x2);
             ST_H(x2, xEmu, offsetof(x64emu_t, segs[_FS]));
             CBZ_NEXT(x2);
@@ -1754,13 +1752,11 @@ uintptr_t dynarec64_0F(dynarec_la64_t* dyn, uintptr_t addr, uintptr_t ip, int ni
             break;
         case 0xA8:
             INST_NAME("PUSH GS");
-            MARK_LEAF_RSP(LEAF_RSP_PUSHPOP);
             LD_HU(x2, xEmu, offsetof(x64emu_t, segs[_GS]));
             PUSH1z(x2);
             break;
         case 0xA9:
             INST_NAME("POP GS");
-            MARK_LEAF_RSP(LEAF_RSP_PUSHPOP);
             POP1z(x2);
             ST_H(x2, xEmu, offsetof(x64emu_t, segs[_GS]));
             CBZ_NEXT(x2);

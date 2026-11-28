@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-#define _GNU_SOURCE         /* See feature_test_macros(7) */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,6 +43,7 @@
 #include "x64int_private.h"
 #include "syscall_user_dispatch.h"
 #include "cpumask.h"
+#include "custommem.h"
 
 typedef struct x64_sigaction_s x64_sigaction_t;
 typedef struct x64_stack_s x64_stack_t;
@@ -112,7 +112,6 @@ static const scwrap_t syscallwrap[] = {
     //[9] = {__NR_mmap, 6},       // wrapped to track mmap
     //[10] = {__NR_mprotect, 3},  // same
     //[11] = {__NR_munmap, 2},    // same
-    [12] = {__NR_brk, 1},
     //[13] = {__NR_rt_sigaction, 4},   // wrapped to use my_ version
     [14] = {__NR_rt_sigprocmask, 4},
     [15] = {__NR_rt_sigreturn, 1},
@@ -380,15 +379,16 @@ static const scwrap_t syscallwrap[] = {
     // TODO: implement fallback if __NR_statx is not defined
     [332] = {__NR_statx, 5},
     #endif
-    #ifdef __NR_io_uring_setup
-    [425] = {__NR_io_uring_setup, 2},
-    #endif
-    #ifdef __NR_io_uring_enter
-    [426] = {__NR_io_uring_enter, 6},
-    #endif
-    #ifdef __NR_io_uring_register
-    [427] = {__NR_io_uring_register, 4},
-    #endif
+    // io_uring is not tivial to wrap, return ENOSYS so applications fall back to regular syscalls.
+    // #ifdef __NR_io_uring_setup
+    // [425] = {__NR_io_uring_setup, 2},
+    // #endif
+    // #ifdef __NR_io_uring_enter
+    // [426] = {__NR_io_uring_enter, 6},
+    // #endif
+    // #ifdef __NR_io_uring_register
+    // [427] = {__NR_io_uring_register, 4},
+    // #endif
     #ifdef __NR_pidfd_open
     [434] = {__NR_pidfd_open, 2},
     #endif
@@ -431,8 +431,8 @@ typedef struct x86_linux_dirent_s {
 } x86_linux_dirent_t;
 
 typedef struct nat_linux_dirent64_s {
-    ino64_t        d_ino;
-    off64_t        d_off;
+    ino_t          d_ino;
+    off_t          d_off;
     unsigned short d_reclen;
     unsigned char  d_type;
     char           d_name[];
@@ -672,6 +672,9 @@ void EXPORT x64Syscall_linux(x64emu_t *emu)
             S_RAX = my_munmap(emu, (void*)R_RDI, R_RSI);
             if(S_RAX==-1)
                 S_RAX = -errno;
+            break;
+        case 12:
+            R_RAX = guest_syscall_brk(R_RDI);
             break;
         case 13: // sys_rt_sigaction
             #if 1
@@ -1159,6 +1162,8 @@ long EXPORT my_syscall(x64emu_t *emu)
             return my_mprotect(emu, (void*)R_RSI, R_RDX, S_ECX);
         case 11: // sys_munmap
             return my_munmap(emu, (void*)R_RSI, R_RDX);
+        case 12:
+            return (intptr_t)guest_syscall_brk(R_RSI);
         case 13: // sys_rt_sigaction
             #if 1
             return my_syscall_rt_sigaction(emu, S_ESI, (const x64_sigaction_restorer_t *)R_RDX, (x64_sigaction_restorer_t *)R_RCX, (size_t)R_R8);

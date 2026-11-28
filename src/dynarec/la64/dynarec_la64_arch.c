@@ -18,22 +18,44 @@
 typedef struct arch_arch_s
 {
     uint16_t unaligned : 1;
-    uint16_t host_call : 1; // instruction performs a native call
-    uint16_t seq : 10;      // how many instruction on the same values
-    uint16_t up32;          // GPRs with pending 32-bit zero-up at this instruction
-    uint16_t ymm_zero;      // YMM upper halves with a deferred architectural zero
-    int16_t rsp;            // pending rsp offset at this instruction
-    uint32_t call_window;   // spill offset within the instruction
+    uint16_t host_call : 1;  // instruction performs a native call
+    uint16_t vec : 1;        // vector registers of the block are cached
+    uint16_t seq : 9;        // how many instruction on the same values
+    uint16_t up32;           // GPRs with pending 32-bit zero-up at this instruction
+    uint16_t ymm_zero;       // YMM upper halves with a deferred architectural zero
+    uint16_t xmm_upper_zero; // XMM upper lanes with a deferred architectural zero
+    uint16_t df_stale : 1;   // emu->df is not live at this instruction (nativeflags)
+    int16_t rsp;             // pending rsp offset at this instruction
+    uint32_t call_window;    // spill offset within the instruction
+    uint16_t xmm;            // XMMs with their value cached in a vector register
+    uint16_t ymm;            // YMM upper halves cached in a vector register
+    uint8_t x87;             // x87 stack registers cached in a vector register
+    uint8_t mmx;             // MMX registers cached in a vector register
+    uint32_t x87_pos;        // vector register of each stack register, 3 bits each
+    uint16_t x87_type;       // type of each cached x87 value, 2 bits each
+    int8_t x87delta;         // pending x87 stack count at this instruction
+    uint8_t scalar[8];       // per scalar slot (reg 16..23): guest xmm | 0x10 if double, 0xFF if unused
 } arch_arch_t;
 
 typedef struct arch_build_s
 {
     uint8_t unaligned;
     uint8_t host_call;
+    uint16_t vec;
     uint16_t up32;
     uint16_t ymm_zero;
+    uint16_t xmm_upper_zero;
+    uint8_t df_stale;
     int16_t rsp;
     uint32_t call_window;
+    uint16_t xmm;
+    uint16_t ymm;
+    uint8_t x87;
+    uint8_t mmx;
+    uint32_t x87_pos;
+    uint16_t x87_type;
+    int8_t x87delta;
+    uint8_t scalar[8];
 } arch_build_t;
 
 static int arch_build(dynarec_la64_t* dyn, int ninst, arch_build_t* arch)
@@ -46,8 +68,45 @@ static int arch_build(dynarec_la64_t* dyn, int ninst, arch_build_t* arch)
     // pending 32-bit zero-ups at this instruction
     arch->up32 = dyn->insts[ninst].up32_pending;
     arch->ymm_zero = dyn->insts[ninst].vector_liveness.ymm_pending;
+    arch->xmm_upper_zero = dyn->insts[ninst].lsx.upper_clear_pending;
+    arch->df_stale = (dyn->insts[ninst].f_entry != status_set);
     arch->rsp = dyn->insts[ninst].rsp_entry;
-    return arch->unaligned || arch->host_call || arch->up32 || arch->ymm_zero || arch->rsp;
+    arch->x87delta = dyn->insts[ninst].lsx.x87stack;
+    for (int i = 0; i < 16; ++i) {
+        if (dyn->insts[ninst].lsx.ssecache[i].v != -1) arch->xmm |= (uint16_t)(1 << i);
+        if (dyn->insts[ninst].lsx.avxcache[i].v != -1) arch->ymm |= (uint16_t)(1 << i);
+    }
+    for (int i = 0; i < 8; ++i) arch->scalar[i] = 0xFF;
+    int scalar_used = 0;
+    for (int i = 16; i < 24; ++i) {
+        int n = dyn->insts[ninst].lsx.lsxcache[i].n;
+        if (dyn->insts[ninst].lsx.lsxcache[i].v) {
+            switch (dyn->insts[ninst].lsx.lsxcache[i].t) {
+                case LSX_CACHE_ST_D:
+                case LSX_CACHE_ST_F:
+                case LSX_CACHE_ST_I64:
+                    if (n < 0 || n > 7) break;
+                    arch->x87 |= (uint8_t)(1 << n);
+                    arch->x87_pos |= (uint32_t)(i - 16) << (n * 3);
+                    arch->x87_type |= (uint16_t)(dyn->insts[ninst].lsx.lsxcache[i].t -
+                                                 LSX_CACHE_ST_D)
+                                      << (n * 2);
+                    break;
+                case LSX_CACHE_MM:
+                    if (i == 16 + n) arch->mmx |= (uint8_t)(1 << n);
+                    break;
+                case LSX_CACHE_XMM_S:
+                case LSX_CACHE_XMM_D:
+                    arch->scalar[i - 16] = (uint8_t)((n & 0x0F) | ((dyn->insts[ninst].lsx.lsxcache[i].t == LSX_CACHE_XMM_D) ? 0x10 : 0));
+                    scalar_used = 1;
+                    break;
+                default: break;
+            }
+        }
+    }
+    arch->vec = (arch->xmm || arch->ymm || arch->x87 || arch->mmx || scalar_used || arch->xmm_upper_zero);
+    return arch->unaligned || arch->host_call || arch->vec || arch->up32 || arch->ymm_zero ||
+           arch->rsp || arch->x87delta || arch->df_stale;
 }
 
 size_t get_size_arch(dynarec_la64_t* dyn)
@@ -61,7 +120,7 @@ size_t get_size_arch(dynarec_la64_t* dyn)
     if(!dyn->size) return 0;
     for(int i=0; i<dyn->size; ++i) {
         last = arch_build(dyn, i, &build);
-        if((!memcmp(&build, &previous, sizeof(arch_build_t))) && (seq<((1<<10)-1)) && i) {
+        if((!memcmp(&build, &previous, sizeof(arch_build_t))) && (seq<((1<<9)-1)) && i) {
             // same sequence, increment
             ++seq;
         } else {
@@ -84,7 +143,18 @@ static void build_next(arch_arch_t* arch, arch_build_t* build)
     arch->seq = 0;
     arch->up32 = build->up32;
     arch->ymm_zero = build->ymm_zero;
+    arch->xmm_upper_zero = build->xmm_upper_zero;
+    arch->df_stale = build->df_stale;
     arch->rsp = build->rsp;
+    arch->vec = build->vec;
+    arch->xmm = build->xmm;
+    arch->ymm = build->ymm;
+    arch->x87 = build->x87;
+    arch->mmx = build->mmx;
+    arch->x87_pos = build->x87_pos;
+    arch->x87_type = build->x87_type;
+    arch->x87delta = build->x87delta;
+    memcpy(arch->scalar, build->scalar, sizeof(arch->scalar));
 }
 
 void* populate_arch(dynarec_la64_t* dyn, void* p, size_t sz)
@@ -97,7 +167,7 @@ void* populate_arch(dynarec_la64_t* dyn, void* p, size_t sz)
     int seq = 0;
     for(int i=0; i<dyn->size; ++i) {
         arch_build(dyn, i, &build);
-        if((!memcmp(&build, &previous, sizeof(arch_build_t))) && (seq<((1<<10)-1)) && i) {
+        if((!memcmp(&build, &previous, sizeof(arch_build_t))) && (seq<((1<<9)-1)) && i) {
             // same sequence, increment
             seq++;
             arch->seq = seq;
@@ -164,12 +234,12 @@ int arch_host_call(dynablock_t* db, void* native_pc, uintptr_t x64pc)
 
 void adjust_arch(dynablock_t* db, x64emu_t* emu, ucontext_t* p, uintptr_t x64pc)
 {
-    (void)p;
     if(!db) return;
     if(!db->arch_size || !db->arch) return;
     int ninst = getX64AddressInst(db, x64pc);
     if(ninst < 0 || ninst >= db->isize) return;
     arch_arch_t* arch = arch_for_ninst(db, ninst);
+    if (arch->df_stale) emu->df = d_none;
     uint16_t up32 = arch->up32;
     while(up32) {
         int r = __builtin_ctz(up32);
@@ -183,4 +253,91 @@ void adjust_arch(dynablock_t* db, x64emu_t* emu, ucontext_t* p, uintptr_t x64pc)
         emu->ymm[r].u128 = 0;
     }
     if (arch->rsp && !arch->host_call) emu->regs[_SP].q[0] += arch->rsp;
+    if (arch->x87delta) {
+        emu->fpu_stack += arch->x87delta;
+        emu->top = (emu->top - arch->x87delta) & 7;
+    }
+    if (arch->vec && !arch->host_call) {
+        struct sctx_info* info = (struct sctx_info*)p->uc_mcontext.__extcontext;
+        uint64_t* vec = NULL;
+        int stride = 0;
+        while (info->magic && !vec) {
+            if (info->magic == LSX_CTX_MAGIC || info->magic == LASX_CTX_MAGIC ||
+                info->magic == FPU_CTX_MAGIC) {
+                stride = (info->magic == LASX_CTX_MAGIC)
+                             ? 4
+                             : ((info->magic == LSX_CTX_MAGIC) ? 2 : 1);
+                vec = (uint64_t*)((uintptr_t)info + sizeof(struct sctx_info));
+            } else {
+                info = (struct sctx_info*)((uintptr_t)info + info->size);
+            }
+        }
+        if (vec) {
+            uint16_t xmm = arch->xmm;
+            uint16_t ymm = arch->ymm;
+            for (int i = 0; i < 16; ++i) {
+                if (!((xmm >> i) & 1) && !((ymm >> i) & 1)) continue;
+                if (stride == 1) {
+                    emu->xmm[i].q[0] = vec[i];
+                } else {
+                    memcpy(&emu->xmm[i].u128, &vec[i * stride], 16);
+                    if ((ymm >> i) & 1) {
+                        if ((arch->ymm_zero >> i) & 1)
+                            emu->ymm[i].u128 = 0;
+                        else if (stride == 4)
+                            memcpy(&emu->ymm[i].u128, &vec[i * stride + 2], 16);
+                    }
+                }
+            }
+            for (int i = 0; i < 8; ++i) {
+                uint8_t scalar = arch->scalar[i];
+                if (scalar == 0xFF) continue;
+                uint64_t raw = vec[(16 + i) * stride];
+                int guest = scalar & 0x0F;
+                if (scalar & 0x10)
+                    emu->xmm[guest].q[0] = raw;
+                else
+                    emu->xmm[guest].ud[0] = (uint32_t)raw;
+            }
+            uint16_t xmm_upper_zero = arch->xmm_upper_zero;
+            while (xmm_upper_zero) {
+                int r = __builtin_ctz(xmm_upper_zero);
+                xmm_upper_zero &= xmm_upper_zero - 1;
+                int is_double = 0;
+                for (int i = 0; i < 8; ++i)
+                    if ((arch->scalar[i] != 0xFF) && ((arch->scalar[i] & 0x0F) == r))
+                        is_double = (arch->scalar[i] & 0x10) != 0;
+                if (is_double)
+                    emu->xmm[r].q[1] = 0;
+                else {
+                    emu->xmm[r].ud[1] = 0;
+                    emu->xmm[r].q[1] = 0;
+                }
+            }
+            uint8_t x87 = arch->x87;
+            while (x87) {
+                int i = __builtin_ctz(x87);
+                x87 &= x87 - 1;
+                int slot = 16 + ((arch->x87_pos >> (i * 3)) & 7);
+                uint64_t raw = vec[slot * stride];
+                switch ((arch->x87_type >> (i * 2)) & 3) {
+                    case LSX_CACHE_ST_D - LSX_CACHE_ST_D:
+                        emu->x87[(emu->top + i) & 7].d = *(double*)&raw;
+                        break;
+                    case LSX_CACHE_ST_F - LSX_CACHE_ST_D:
+                        emu->x87[(emu->top + i) & 7].d = *(float*)&raw;
+                        break;
+                    default:
+                        emu->x87[(emu->top + i) & 7].d = *(int64_t*)&raw;
+                        break;
+                }
+            }
+            uint8_t mmx = arch->mmx;
+            while (mmx) {
+                int i = __builtin_ctz(mmx);
+                mmx &= mmx - 1;
+                emu->mmx[i].q = vec[(16 + i) * stride] & 0xffffffffffffffffULL;
+            }
+        }
+    }
 }

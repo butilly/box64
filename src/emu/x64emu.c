@@ -244,8 +244,7 @@ void CloneEmu(x64emu_t *newemu, const x64emu_t* emu)
     newemu->sw = emu->sw;
     newemu->top = emu->top;
     newemu->fpu_stack = emu->fpu_stack;
-    memcpy(newemu->xmm, emu->xmm, sizeof(emu->xmm));
-    memcpy(newemu->ymm, emu->ymm, sizeof(emu->ymm));
+    memcpy(newemu->ymm256, emu->ymm256, sizeof(emu->ymm256));
     newemu->df = emu->df;
     newemu->op1 = emu->op1;
     newemu->op2 = emu->op2;
@@ -267,8 +266,7 @@ void CopyEmu(x64emu_t *newemu, const x64emu_t* emu)
     memcpy(newemu->segs_offs, emu->segs_offs, sizeof(emu->segs_offs));
     memcpy(newemu->x87, emu->x87, sizeof(emu->x87));
     memcpy(newemu->mmx, emu->mmx, sizeof(emu->mmx));
-    memcpy(newemu->xmm, emu->xmm, sizeof(emu->xmm));
-    memcpy(newemu->ymm, emu->ymm, sizeof(emu->ymm));
+    memcpy(newemu->ymm256, emu->ymm256, sizeof(emu->ymm256));
     memcpy(newemu->fpu_ld, emu->fpu_ld, sizeof(emu->fpu_ld));
     memcpy(newemu->fpu_ll, emu->fpu_ll, sizeof(emu->fpu_ll));
     newemu->fpu_tags = emu->fpu_tags;
@@ -419,21 +417,21 @@ const char* DumpCPURegs(x64emu_t* emu, uintptr_t ip, int is32bits)
     if(BOX64ENV(trace_xmm)) {
         // do xmm reg if needed
         for(int i=0; i<(is32bits?8:16); ++i) {
-            if (BOX64ENV(trace_regsdiff) && (emu->old_xmm[i].q[0] != emu->xmm[i].q[0] || emu->old_xmm[i].q[1] != emu->xmm[i].q[1])) {
-                sprintf(tmp, "\e[1;35m%02d:%016lx-%016lx\e[m", i, emu->xmm[i].q[1], emu->xmm[i].q[0]);
-                emu->old_xmm[i].q[0] = emu->xmm[i].q[0];
-                emu->old_xmm[i].q[1] = emu->xmm[i].q[1];
+            if (BOX64ENV(trace_regsdiff) && (emu->old_xmm[i].q[0] != getXMM(emu, i)->q[0] || emu->old_xmm[i].q[1] != getXMM(emu, i)->q[1])) {
+                sprintf(tmp, "\e[1;35m%02d:%016lx-%016lx\e[m", i, getXMM(emu, i)->q[1], getXMM(emu, i)->q[0]);
+                emu->old_xmm[i].q[0] = getXMM(emu, i)->q[0];
+                emu->old_xmm[i].q[1] = getXMM(emu, i)->q[1];
             } else {
-                sprintf(tmp, "%02d:%016lx-%016lx", i, emu->xmm[i].q[1], emu->xmm[i].q[0]);
+                sprintf(tmp, "%02d:%016lx-%016lx", i, getXMM(emu, i)->q[1], getXMM(emu, i)->q[0]);
             }
             strcat(buff, tmp);
             if(BOX64ENV(avx)) {
-                if (BOX64ENV(trace_regsdiff) && (emu->old_ymm[i].q[0] != emu->ymm[i].q[0] || emu->old_ymm[i].q[1] != emu->ymm[i].q[1])) {
-                    sprintf(tmp, "\e[1;35m-%016lx-%016lx\e[m", emu->ymm[i].q[1], emu->ymm[i].q[0]);
-                    emu->old_ymm[i].q[0] = emu->ymm[i].q[0];
-                    emu->old_ymm[i].q[1] = emu->ymm[i].q[1];
+                if (BOX64ENV(trace_regsdiff) && (emu->old_ymm[i].q[0] != getYMM(emu, i)->q[0] || emu->old_ymm[i].q[1] != getYMM(emu, i)->q[1])) {
+                    sprintf(tmp, "\e[1;35m-%016lx-%016lx\e[m", getYMM(emu, i)->q[1], getYMM(emu, i)->q[0]);
+                    emu->old_ymm[i].q[0] = getYMM(emu, i)->q[0];
+                    emu->old_ymm[i].q[1] = getYMM(emu, i)->q[1];
                 } else {
-                    sprintf(tmp, "-%016lx-%016lx", emu->ymm[i].q[1], emu->ymm[i].q[0]);
+                    sprintf(tmp, "-%016lx-%016lx", getYMM(emu, i)->q[1], getYMM(emu, i)->q[0]);
                 }
                 strcat(buff, tmp);
             }
@@ -1235,23 +1233,27 @@ void UpdateFlags(x64emu_t* emu)
         case d_shrd16:
             cnt = emu->op2.u16;
             if (cnt > 0) {
-                cc = emu->op1.u16 & (1 << (cnt - 1));
-                if (cnt > 15 && BOX64ENV(cputype))
+                // fill operand is stored in the upper half of op2
+                if (cnt > 16)
+                    cc = (emu->op2.u64 >> 16) & 0xffff & (1u << (cnt - 17));
+                else
+                    cc = emu->op1.u16 & (1 << (cnt - 1));
+                if (cnt > 16 && BOX64ENV(cputype))
                     cc = 0;
                 CONDITIONAL_SET_FLAG(cc, F_CF);
                 CONDITIONAL_SET_FLAG(!emu->res.u16, F_ZF);
                 CONDITIONAL_SET_FLAG(emu->res.u16 & 0x8000, F_SF);
                 CONDITIONAL_SET_FLAG(PARITY(emu->res.u8), F_PF);
+                if BOX64ENV (cputype) {
+                    CONDITIONAL_SET_FLAG(XOR2(emu->res.u16 >> 14), F_OF);
+                } else {
+                    CONDITIONAL_SET_FLAG((((emu->op2.u64 >> 16) & 0xffff) ^ (emu->op1.u16 >> 15)) & 1, F_OF);
+                }
+                if (BOX64ENV(cputype))
+                    SET_FLAG(F_AF);
+                else
+                    CLEAR_FLAG(F_AF);
             }
-            if BOX64ENV (cputype) {
-                CONDITIONAL_SET_FLAG(XOR2(emu->res.u16 >> 14), F_OF);
-            } else {
-                CONDITIONAL_SET_FLAG(((emu->res.u16 >> (16 - (cnt & 15))) ^ (emu->op1.u16 >> 15)) & 1, F_OF);
-            }
-            if (BOX64ENV(cputype))
-                SET_FLAG(F_AF);
-            else
-                CLEAR_FLAG(F_AF);
             break;
         case d_shrd32:
             cnt = emu->op2.u32;
@@ -1294,7 +1296,12 @@ void UpdateFlags(x64emu_t* emu)
         case d_shld16:
             cnt = emu->op2.u16;
             if (cnt > 0) {
-                cc = emu->op1.u16 & (1 << (16 - cnt));
+                if (cnt > 16)
+                    cc = (emu->op2.u64 >> 16) & 0xffff & (1u << (32 - cnt));
+                else
+                    cc = emu->op1.u16 & (1 << (16 - cnt));
+                if (cnt > 16 && BOX64ENV(cputype))
+                    cc = 0;
                 CONDITIONAL_SET_FLAG(cc, F_CF);
                 CONDITIONAL_SET_FLAG(!emu->res.u16, F_ZF);
                 CONDITIONAL_SET_FLAG(emu->res.u16 & 0x8000, F_SF);

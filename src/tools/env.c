@@ -57,7 +57,6 @@ static const char default_rcfile[] =
 "\n"
 "[heroic]\n"
 "BOX64_NOSANDBOX=1\n"
-"BOX64_MALLOC_HACK=2\n"
 "\n"
 "[LotCG.x86_64]\n"
 "BOX64_DYNAREC_FASTROUND=0\n"
@@ -238,6 +237,7 @@ static void applyCustomRules()
             SET_BOX64ENV_IF_EMPTY(dynarec_bigblock, 0);
             SET_BOX64ENV_IF_EMPTY(dynarec_safeflags, 2);
             SET_BOX64ENV_IF_EMPTY(dynarec_strongmem, 2);
+            SET_BOX64ENV_IF_EMPTY(dynarec_callret, 3);
         } else if (!strcasecmp(box64env.profile, "safe")) {
             SET_BOX64ENV_IF_EMPTY(dynarec_bigblock, 0);
             SET_BOX64ENV_IF_EMPTY(dynarec_safeflags, 2);
@@ -802,12 +802,13 @@ void RecordEnvMappings(uintptr_t addr, size_t length, int fd)
     if(!mapping_entries) mapping_entries = kh_init(mapping_entry);
 
     char* filename = NULL;
-    static char fullname[4096];
+    char fullname[4096];
     if (fd > 0) {
-        static char buf[128];
+        char buf[128];
         sprintf(buf, "/proc/self/fd/%d", fd);
         ssize_t r = readlink(buf, fullname, sizeof(fullname) - 1);
-        if (r != -1) fullname[r] = 0;
+        if (r == -1) return;
+        fullname[r] = 0;
 
         filename = strrchr(fullname, '/');
     }
@@ -866,7 +867,7 @@ void RecordEnvMappings(uintptr_t addr, size_t length, int fd)
     if(new_mapping) {
         // First time we see this file
         if (box64_wine && BOX64ENV(unityplayer)) DetectUnityPlayer(lowercase_filename+1);
-        if (box64_wine && !box64_is32bits && BOX64ENV(dynarec_volatile_metadata)) ParseVolatileMetadata(fullname, (void*)addr);
+        if (box64_wine && !box64_is32bits && BOX64ENV(dynarec_volatile_metadata) && (getProtection(addr)&PROT_READ)) ParseVolatileMetadata(fullname, (void*)addr);
         #if defined(DYNAREC) && !defined(WIN32)
         int dynacache = box64env.dynacache;
         if(mapping->env && mapping->env->is_dynacache_overridden)

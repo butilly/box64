@@ -828,7 +828,6 @@
 #() lFppl
 #() lFppL
 #() lFppp
-#() lFppS
 #() lFSpl
 #() LFEpW
 #() LFEpu
@@ -871,6 +870,7 @@
 #() pFEup
 #() pFEuV
 #() pFEuA
+#() pFELL
 #() pFEpi
 #() pFEpu
 #() pFEpL
@@ -1180,6 +1180,7 @@
 #() iFEpuV
 #() iFEpUi
 #() iFEpLi
+#() iFEpLL
 #() iFEpLp
 #() iFEppi
 #() iFEppd
@@ -1513,6 +1514,7 @@
 #() lFEipV
 #() lFEpip
 #() lFEppL
+#() lFEppS
 #() lFiiLu
 #() lFiipL
 #() lFipiI
@@ -1535,7 +1537,6 @@
 #() lFpLpp
 #() lFppii
 #() lFppip
-#() lFppiS
 #() lFpplp
 #() lFppLi
 #() lFppLp
@@ -1585,11 +1586,13 @@
 #() pFEpCL
 #() pFEpup
 #() pFEplp
+#() pFEpLL
 #() pFEppi
 #() pFEppu
 #() pFEppp
 #() pFEppV
 #() pFEppA
+#() pFEPPP
 #() pFiiii
 #() pFiiiu
 #() pFiiip
@@ -2222,6 +2225,7 @@
 #() dFppppL
 #() lFEippL
 #() lFEuipp
+#() lFEppiS
 #() lFEppLL
 #() lFipiIi
 #() lFipili
@@ -2805,9 +2809,9 @@
 #() uFpupupu
 #() uFpupupp
 #() uFpupppu
-#() uFpupppp
 #() uFppiiii
 #() uFppiuup
+#() uFppiplp
 #() uFppCCCC
 #() uFppuuup
 #() uFppuupu
@@ -3261,6 +3265,7 @@
 #() uFpuuuupp
 #() uFpuuuppp
 #() uFpuupppp
+#() uFppiippp
 #() uFppiuppi
 #() uFppiuppp
 #() uFppuiupu
@@ -3562,9 +3567,10 @@
 #() uFpuupupuu
 #() uFpupuuuCp
 #() uFpupLpupp
+#() uFppipuupp
 #() uFppuuuupp
 #() uFppuuuppu
-#() uFppuppppp
+#() uFppupippp
 #() uFpppLppLp
 #() uFppppuppu
 #() uFpppppupp
@@ -3925,6 +3931,7 @@
 #() pFppuiipuuii
 #() pFppuuLLuppp
 #() pFpppiiiiiii
+#() pFpppppiiiii
 #() pFpppppppppp
 #() pFbuuuWWWCCi
 #() iWEpuipupppp
@@ -3998,6 +4005,7 @@
 #() uFEpLuppppLuA
 #() uFEppppppuppp
 #() uFpuuuuuuuppp
+#() uFppppiuupppp
 #() uFppppppppppp
 #() UFbuCCWWCCCCp
 #() UFbuWWCCCCCCp
@@ -4233,8 +4241,10 @@
 #!defined(NOALIGN) iFEipiip
 #!defined(NOALIGN) iFEipipp
 #!defined(STATICBUILD) lFiN
+#!defined(STATICBUILD) vFEpL
 #!defined(STATICBUILD) iFlip
 #!defined(STATICBUILD) iFLLi
+#!defined(STATICBUILD) vFEpLL
 #!defined(STATICBUILD) iFLLii
 #!defined(STATICBUILD) WFpLLu
 #!defined(STATICBUILD) pFpLiS
@@ -4427,6 +4437,7 @@ wrappedcrypto3:
   - EVP_MD_do_all_provided
 - iFppp:
   - ASN1_i2d_bio
+  - CRYPTO_set_mem_functions
 - iFppV:
   - BIO_printf
 - pFppp:
@@ -5575,7 +5586,10 @@ wrappedlibc:
   - _ITM_deregisterTMCloneTable
   - _ZGTtdlPv
   - __cxa_finalize
+  - __libc_free
+  - cfree
   - cnd_destroy
+  - free
 - iFv:
   - __getpagesize
   - fork
@@ -5589,6 +5603,7 @@ wrappedlibc:
   - _setjmp
   - at_quick_exit
   - atexit
+  - brk
   - cnd_broadcast
   - cnd_init
   - cnd_signal
@@ -5611,15 +5626,32 @@ wrappedlibc:
   - sysconf
 - LFL:
   - getauxval
+- LFp:
+  - malloc_usable_size
+- pFv:
+  - get_current_dir_name
+- pFl:
+  - __sbrk
+  - sbrk
 - pFL:
   - _ZGTtnaX
   - _ZGTtnam
+  - __libc_malloc
+  - __libc_pvalloc
+  - __libc_valloc
+  - malloc
+  - pvalloc
+  - valloc
 - pFp:
   - __deregister_frame_info
+  - __strdup
+  - canonicalize_file_name
   - fts64_read
   - fts_read
   - mallinfo
   - mallinfo2
+  - strdup
+  - wcsdup
 - vFpi:
   - __longjmp_chk
   - _longjmp
@@ -5628,6 +5660,8 @@ wrappedlibc:
   - siglongjmp
 - vFpu:
   - _ITM_registerTMCloneTable
+- vFpL:
+  - free_sized
 - vFpp:
   - __register_frame_info
   - _obstack_free
@@ -5701,18 +5735,32 @@ wrappedlibc:
   - signal
   - sigset
   - sysv_signal
+- pFLL:
+  - __libc_calloc
+  - __libc_memalign
+  - aligned_alloc
+  - calloc
+  - memalign
 - pFpi:
   - __libc_dlopen_mode
   - backtrace_symbols
   - fts64_children
   - fts_children
+- pFpL:
+  - __libc_realloc
+  - __strndup
+  - getcwd
+  - realloc
+  - strndup
 - pFpp:
   - __libc_dlsym
   - __realpath_chk
   - realpath
+  - tempnam
 - SFpp:
   - fopen
   - fopen64
+  - open_memstream
 - HFHH:
   - __udivti3
 - vFipV:
@@ -5727,6 +5775,8 @@ wrappedlibc:
   - backtrace_symbols_fd
 - vFpup:
   - _ITM_addUserCommitAction
+- vFpLL:
+  - free_aligned_sized
 - vFppL:
   - _ITM_memcpyRnWt
   - _ITM_memcpyRtWn
@@ -5768,6 +5818,8 @@ wrappedlibc:
   - madvise
   - mprotect
   - posix_madvise
+- iFpLL:
+  - posix_memalign
 - iFpLp:
   - init_module
 - iFppi:
@@ -5826,12 +5878,17 @@ wrappedlibc:
   - __wprintf_chk
 - lFppL:
   - readlink
+- lFppS:
+  - getline
 - LFppL:
   - strlcat
   - strlcpy
 - pFpip:
   - fts64_open
   - fts_open
+- pFpLL:
+  - __getcwd_chk
+  - reallocarray
 - pFppp:
   - tdelete
   - tfind
@@ -5898,6 +5955,9 @@ wrappedlibc:
   - readlinkat
 - lFuipp:
   - ptrace
+- lFppiS:
+  - __getdelim
+  - getdelim
 - lFppLL:
   - __readlink_chk
 - vFpiipV:
@@ -6264,10 +6324,17 @@ wrappedlibm:
   - __powl_finite
 wrappedlibmvec:
 - vFv:
+  - _ZGVbN2v_acos
   - _ZGVbN2v_cos
+  - _ZGVbN2v_cosh
+  - _ZGVbN2v_erf
   - _ZGVbN2v_exp
   - _ZGVbN2v_log
+  - _ZGVbN2v_log10
   - _ZGVbN2v_sin
+  - _ZGVbN2v_sinh
+  - _ZGVbN2v_tanh
+  - _ZGVbN2vv_atan2
   - _ZGVbN2vv_pow
   - _ZGVbN4v_cosf
   - _ZGVbN4v_expf
@@ -7598,6 +7665,8 @@ wrappedvorbisfile:
 - lFppiiiippp:
   - ov_read_filter
 wrappedvulkan:
+- iFp:
+  - vkNegotiateLoaderLayerInterfaceVersion
 - vFpp:
   - vkDestroyDevice
   - vkDestroyInstance
@@ -7741,6 +7810,8 @@ wrappedwaylandclient:
   - wl_log_set_handler_client
 - iFppp:
   - wl_proxy_add_listener
+- iFpppp:
+  - wl_proxy_add_dispatcher
 wrappedwaylandcursor:
 wrappedwaylandegl:
 wrappedxinerama:
@@ -7828,3 +7899,8 @@ wrappedxslt:
 - iFpppp:
   - xsltRegisterExtFunction
 wrappedzstd:
+% M my_ZSTD_customMem PPP
+- pFM:
+  - ZSTD_createCStream_advanced
+  - ZSTD_createDStream_advanced
+% pFEM
